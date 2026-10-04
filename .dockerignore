@@ -1,0 +1,43 @@
+# Contexto de build do wager-service.
+#
+# O que esta aqui fora nunca deve entrar na imagem: fonte versionada que o
+# Dockerfile ja copia por diretorio, e os arquivos locais de quem desenvolve.
+#
+# .git e .gitignore nao vao porque aumentam o contexto sem entrar em nenhuma
+# camada do Dockerfile. O resultado seria um cache de build invalido a cada
+# commit, sem nenhum beneficio.
+
+.git
+.gitignore
+.gitattributes
+.editorconfig
+
+# Artefatos de build e cobertura
+/bin
+/dist
+/out
+coverage.out
+coverage.html
+coverage.txt
+
+# Configuracao local com segredo
+.env
+.env.*
+!.env.example
+
+# Documentacao e tooling que o build nao consome
+docs
+tests
+deploy
+scripts
+docker-compose.yml
+Makefile
+k6-report.html
+
+# Editores e sistema operacional
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
