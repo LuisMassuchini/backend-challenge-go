@@ -1,0 +1,45 @@
+# Artefatos de build
+/bin/
+/dist/
+/out/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.a
+*.o
+
+# Cobertura
+coverage.out
+coverage.html
+coverage.txt
+*.coverprofile
+
+# Ambiente e segredos
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!deploy/keycloak/*.public
+
+# Ferramentas
+/bin/mockgen
+k6-report.html
+
+# Editores
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

@@ -1,0 +1,26 @@
+# Normaliza para LF no repositório e no working tree, independentemente do SO.
+# Sem isso, um checkout no Windows converte para CRLF e quebra builds reproduzíveis.
+* text=auto eol=lf
+
+# Arquivos gerados ou binários: nunca devem ser convertidos.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+
+# Lockfile e migrations: LF obrigatório, sem conversão.
+go.sum text eol=lf
+go.mod text eol=lf
+migrations/*.sql text eol=lf
+
+# Scripts executáveis mantêm o bit de execução.
+*.sh text eol=lf
+*.ps1 text eol=crlf
