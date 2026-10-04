@@ -73,6 +73,43 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3.3
+    command:
+      - start-dev
+      - --import-realm
+    environment:
+      # O bootstrap admin pertence ao ambiente local de teste. A senha aqui e
+      # publica por desenho: quem le o repositorio precisa conseguir entrar no
+      # IdP para rodar os testes autenticados. O que nao pode e um segredo real
+      # neste arquivo.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${WAGER_KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${WAGER_KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "${WAGER_KEYCLOAK_PORT:-8081}:8080"
+    volumes:
+      # O realm entra por import no start: o ambiente sobe com realm, clientes,
+      # escopos e identidades de teste prontos, sem passo manual. O caminho e o
+      # que o Keycloak le no start-dev.
+      - ./deploy/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # A imagem do Keycloak nao tem curl nem wget, e o descritor de porta do
+      # shell e o unico jeito de consultar o endpoint sem instalar nada na
+      # imagem. O status UP so aparece depois que o import do realm termina, e
+      # por isso o healthcheck tambem serve de espera de readiness.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/localhost/9000
+          && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          && grep -q '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   postgres-dados:
   localstack-dados:

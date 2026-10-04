@@ -1,0 +1,126 @@
+{
+  "realm": "wager",
+  "displayName": "Wager Service (local)",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "bruteForceProtected": false,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 3600,
+  "roles": {
+    "realm": [
+      {
+        "name": "wager-service",
+        "description": "Servico interno. Executa abertura de carteira e reconciliacao."
+      },
+      {
+        "name": "provider-a",
+        "description": "Provedor de jogos A. Autorizado a operar apenas a si mesmo."
+      },
+      {
+        "name": "provider-b",
+        "description": "Provedor de jogos B. Existe para provar isolamento entre provedores."
+      }
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "wager:operacoes",
+      "description": "Envia operacoes financeiras externas. Concedido apenas a provedores.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "wager:carteira:abertura",
+      "description": "Abre carteira. Reservado ao servico interno.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "wager:reconciliacao",
+      "description": "Roda reconciliacao de saldo. Reservado ao servico interno.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "wager-service",
+      "name": "wager-service",
+      "description": "Cliente interno. Autenticado por client_credentials, sem usuario.",
+      "secret": "wager-service-secret",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [
+        "profile",
+        "roles",
+        "wager:carteira:abertura",
+        "wager:reconciliacao"
+      ],
+      "attributes": {
+        "access.token.lifespan": "300"
+      }
+    },
+    {
+      "clientId": "provider-a",
+      "name": "provider-a",
+      "description": "Provedor A. Envia operacoes externas e so enxerga as proprias.",
+      "secret": "provider-a-secret",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["profile", "roles", "wager:operacoes"],
+      "attributes": {
+        "access.token.lifespan": "300"
+      }
+    },
+    {
+      "clientId": "provider-b",
+      "name": "provider-b",
+      "description": "Provedor B. Existe para o teste de isolamento entre provedores.",
+      "secret": "provider-b-secret",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["profile", "roles", "wager:operacoes"],
+      "attributes": {
+        "access.token.lifespan": "300"
+      }
+    }
+  ],
+  "defaultDefaultClientScopes": [
+    "role_list",
+    "profile",
+    "email",
+    "web-origins",
+    "acr"
+  ]
+}
