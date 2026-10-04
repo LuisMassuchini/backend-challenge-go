@@ -58,7 +58,7 @@ a decisao teve trade-off.>
 | `ci` | integracao continua |
 
 O escopo `test(...)` e reservado. Nao e TDD: ele cobre suite que outliva a mudanca,
-correcao ou reforço de teste existente, e os cenarios de integracao, concorrencia e
+correcao ou reforco de teste existente, e os cenarios de integracao, concorrencia e
 recuperacao, que so existem depois que a infrastrutura real esta montada.
 
 ### Escopos
