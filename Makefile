@@ -18,7 +18,7 @@ GO_IMAGE ?= golang:1.27.0
 
 .DEFAULT_GOAL := help
 
-.PHONY: help
+.PHONY: help check-ascii
 ##@ Ajuda
 
 help: ## Lista os alvos disponiveis
@@ -28,11 +28,26 @@ help: ## Lista os alvos disponiveis
 
 ##@ Gate
 
-verify: fmt-check vet build test ## Gate minimo: gofmt, vet, build e testes
+verify: check-ascii fmt-check vet build test ## Gate minimo: ASCII, gofmt, vet, build e testes
 verify-docker: ## Gate minimo dentro da imagem oficial do Go
 	docker run --rm -v "$(CURDIR):/src" -w /src $(GO_IMAGE) make verify
 
 ##@ Codigo
+
+# A convencao de escrever sem acento so se sustenta se o portao a verificar.
+# README.md e docs/challenge.md ficam de fora: sao o enunciado do desafio,
+# que vem com acentuacao e nao e nosso para reformatar.
+#
+# A deteccao usa LC_ALL=C com a classe [:print:], e nao grep -P com \x: no GNU
+# grep 3.0 o \x dentro de expressao regular POSIX nao identifica o byte, e o
+# padrao passa a casar com arquivo que e todo ASCII. Debaixo de LC_ALL=C, um
+# byte acima de 0x7F nao e imprimivel, e e exatamente isso que se quer pegar.
+check-ascii: ## Falha se arquivo versionado tiver caractere fora do ASCII
+	@bad=$$(git ls-files '*.go' '*.md' 'Makefile' ':!README.md' ':!docs/challenge.md' \
+		| LC_ALL=C xargs -r grep -l '[^[:print:][:space:]]' 2>/dev/null); \
+	if [ -n "$$bad" ]; then \
+		echo "arquivos com caractere fora do ASCII:"; echo "$$bad"; exit 1; \
+	fi
 
 fmt: ## Formata o codigo
 	$(GO) fmt ./...
