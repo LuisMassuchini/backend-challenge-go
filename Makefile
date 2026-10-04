@@ -1,0 +1,82 @@
+# Verificacao e testes do wager-service.
+#
+# O container e o caminho oficial: a imagem e a mesma declarada no Dockerfile, de
+# modo que o container e a unica fonte de verdade do toolchain e nenhum passo
+# depende do que esta instalado na maquina de quem desenvolve.
+#
+# Os alvos sem sufixo usam o toolchain local. Eles existem para o ciclo TDD na
+# maquina de desenvolvimento e nao substituem o gate oficial: quando o Docker
+# estiver disponivel, o commit deve ser verificado com `verify-docker`.
+#
+# As receitas sao POSIX e dependem de um shell POSIX. No Windows, o GNU make
+# procura `sh.exe`, que o Git for Windows instala em `usr/bin` mas nao coloca no
+# PATH por padrao. Sem isso, nenhuma receita roda.
+
+GO       ?= go
+GOFMT    ?= gofmt
+GO_IMAGE ?= golang:1.27.0
+
+.DEFAULT_GOAL := help
+
+.PHONY: help
+##@ Ajuda
+
+help: ## Lista os alvos disponiveis
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
+		| sort \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
+
+##@ Gate
+
+verify: fmt-check vet build test ## Gate minimo: gofmt, vet, build e testes
+verify-docker: ## Gate minimo dentro da imagem oficial do Go
+	docker run --rm -v "$(CURDIR):/src" -w /src $(GO_IMAGE) make verify
+
+##@ Codigo
+
+fmt: ## Formata o codigo
+	$(GO) fmt ./...
+
+fmt-check: ## Falha se algum arquivo estiver fora do gofmt
+	@unformatted="$$($(GOFMT) -l .)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "arquivos fora do gofmt:"; echo "$$unformatted"; exit 1; \
+	fi
+
+vet: ## Executa go vet
+	$(GO) vet ./...
+
+build: ## Compila todos os pacotes
+	$(GO) build ./...
+
+tidy: ## Sincroniza go.mod e go.sum
+	$(GO) mod tidy
+
+##@ Testes
+
+test: ## Executa a suite de testes
+	$(GO) test ./...
+
+test-race: ## Executa a suite com o detector de corrida
+	$(GO) test -race ./...
+
+cover: ## Gera o relatorio de cobertura em coverage.out
+	$(GO) test -coverprofile=coverage.out -covermode=atomic ./...
+	$(GO) tool cover -func=coverage.out
+
+test-docker: ## Executa a suite dentro da imagem oficial do Go
+	docker run --rm -v "$(CURDIR):/src" -w /src $(GO_IMAGE) make test
+
+##@ Execucao
+
+run: ## Sobe a aplicacao
+	$(GO) run ./cmd/wager-service
+
+shell-docker: ## Abre um shell na imagem oficial do Go, com o repo montado
+	docker run --rm -it -v "$(CURDIR):/src" -w /src $(GO_IMAGE) sh
+
+##@ Limpeza
+
+clean: ## Remove artefatos locais
+	$(GO) clean
+	rm -f coverage.out coverage.html
