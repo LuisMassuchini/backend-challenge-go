@@ -30,6 +30,17 @@ var (
 	ErrSaldosIncoerentes = errors.New("pg: lancamento incoerente com o saldo")
 )
 
+// ErrConflitoDeReserva cobre reserva de registro que outro publisher ja pegou.
+//
+// Nao e erro do relay: e corrida benigna entre publishers, e o relay simplesmente
+// tenta de novo na proxima volta. Existe como erro proprio para que o log diga
+// "outro publisher pegou antes" em vez de "falha ao reservar", que seria
+// diagnostico errado.
+var ErrConflitoDeReserva = errors.New("pg: registro reservado por outro publisher")
+
+// isNenhumaLinha informa se o erro e ausencia de linha no QueryRow.
+func isNenhumaLinha(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
+
 // Opcoes de pool sao os limites que importam para este sistema.
 type Opcoes struct {
 	// MaxConexoes e o limite de conexoes do pool. O valor e pequeno de proposito:
