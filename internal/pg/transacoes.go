@@ -285,6 +285,45 @@ func (r RepositorioTransacoes) ResolverReferencia(
 	return nil
 }
 
+// ReversoesSobre devolve os tipos de reversao ja concluidos sobre a referencia.
+//
+// E a entrada da politica de reversao do dominio. Ler do banco e nao da memoria
+// porque a reversao anterior pode ter sido aplicada por outra instancia, e um
+// processo nao pode saber o que o outro concluiu.
+//
+// A consulta filtra por estado terminal de sucesso: uma reversao que foi REJECTED
+// nao estorva a proxima, porque nao happened.
+func (r RepositorioTransacoes) ReversoesSobre(
+	ctx context.Context,
+	q Querente,
+	referenciada wallet.Identificador,
+) ([]wagering.Tipo, error) {
+	linhas, err := q.Query(ctx, `
+		SELECT kind FROM wager_transactions
+		 WHERE reference_internal_id = $1
+		   AND state = 'PROCESSED'
+		   AND kind IN ('REFUND', 'ROLLBACK')`,
+		referenciada.UUID(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("pg: leitura das reversoes: %w", err)
+	}
+	defer linhas.Close()
+
+	tipos := []wagering.Tipo{}
+	for linhas.Next() {
+		var tipo *string
+		if err := linhas.Scan(&tipo); err != nil {
+			return nil, fmt.Errorf("pg: varredura das reversoes: %w", err)
+		}
+		tipos = append(tipos, wagering.Tipo(textoDe(tipo)))
+	}
+	if err := linhas.Err(); err != nil {
+		return nil, fmt.Errorf("pg: varredura das reversoes: %w", err)
+	}
+	return tipos, nil
+}
+
 // scannerTransacao converte a linha em agregado do dominio.
 //
 // Toda conversao falha alto: se o dado gravado nao pode virar um Transacao valido,
