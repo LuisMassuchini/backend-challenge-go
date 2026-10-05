@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -75,6 +76,7 @@ type Runtime struct {
 type Config struct {
 	Runtime Runtime
 	HTTP    HTTP
+	OIDC    OIDC
 }
 
 // ValidationError nomeia a variavel de ambiente que precisa ser corrigida.
@@ -149,7 +151,156 @@ func FromEnv(getenv func(string) (string, bool)) (Config, error) {
 	}
 	cfg.Runtime = Runtime{LogLevel: nivel}
 
+	oidc, err := lerOIDC(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.OIDC = oidc
+
 	return cfg, nil
+}
+
+// OIDC e o endereco do IdP e os prazos da validacao.
+type OIDC struct {
+	// Issuer e o valor esperado do claim iss. Obrigatorio: sem ele um token de
+	// qualquer outro IdP seria aceito, desde que a chave fosse a mesma.
+	Issuer string
+
+	// Audience e o valor esperado do claim aud. Obrigatorio pelo mesmo motivo: sem
+	// ele, um token emitido para outro cliente do mesmo realm serviria aqui.
+	Audience string
+
+	// URLJWKS e onde buscar as chaves publicas. Derivada de Issuer quando vazia,
+	// porque os dois endereos sao o mesmo realm visto de dois lugares.
+	URLJWKS string
+
+	// CacheJWKS e quanto tempo uma chave buscada continua valendo.
+	CacheJWKS time.Duration
+
+	// MargemDeRelogio e quanto antes do vencimento o token e recusado.
+	MargemDeRelogio time.Duration
+
+	// HTTPTimeout limita a ida ate o IdP buscar as chaves.
+	HTTPTimeout time.Duration
+}
+
+// Caminho padrao do JWKS dentro do realm.
+//
+// Existe porque o caminho e convencao do Keycloak e nao escolha deste servico, e
+// escrevelo no ambiente so seria uma chance de errar o path e receber um 404 em
+// vez de um token recusado.
+const caminhoPadraoJWKS = "/protocol/openid-connect/certs"
+
+// chaves do grupo OIDC.
+const (
+	ChaveOIDCIssuer        = "WAGER_OIDC_ISSUER"
+	ChaveOIDCAudience      = "WAGER_OIDC_AUDIENCE"
+	ChaveOIDCURLJWKS       = "WAGER_OIDC_URL_JWKS"
+	ChaveOIDCCacheJWKS     = "WAGER_OIDC_CACHE_JWKS"
+	ChaveOIDCMargemRelogio = "WAGER_OIDC_MARGEM_RELOGIO"
+	ChaveOIDCHTTPTimeout   = "WAGER_OIDC_HTTP_TIMEOUT"
+)
+
+// Prazos padrao.
+//
+// O cache e de cinco minutos porque e o mesmo prazo que o resto do sistema elegeu:
+// janela curta o bastante para que uma chave trocada entre em vigor sem reiniciar o
+// processo, e longa o bastante para que o caminho comum da requisicao nao dependa
+// do IdP.
+const (
+	cacheJWKSPadrao       = 5 * time.Minute
+	margemDeRelogioPadrao = 30 * time.Second
+	httpTimeoutOIDC       = 3 * time.Second
+)
+
+// lerOIDC le o endereco do IdP.
+//
+// O grupo inteiro e opcional: sem nenhuma variavel de OIDC a aplicacao sobe sem
+// autenticacao, que e o que permite rodar migrations e testes de dominio sem um IdP
+// no ar. Mas um grupo pela metade e erro de configuracao, e nao um grupo ausente: quem
+// configura Issuer sem Audience precisa saber disso no start, e nao descobrir na
+// primeira requisicao que um token de qualquer cliente do realm esta sendo aceito.
+func lerOIDC(getenv func(string) (string, bool)) (OIDC, error) {
+	issuer, definido := getenv(ChaveOIDCIssuer)
+	issuer = strings.TrimSuffix(strings.TrimSpace(issuer), "/")
+
+	if issuer == "" {
+		if definido {
+			return OIDC{}, &ValidationError{
+				Field:  ChaveOIDCIssuer,
+				Reason: "a variavel esta presente e vazia; remova a linha ou informe o realm, como \"http://localhost:8081/realms/wager\"",
+			}
+		}
+
+		// Sem Issuer, nenhuma outra variavel do grupo faz sentido. Um JWKS sem emissor
+		// seria um servico que aceita qualquer token assinado pela chave certa, que e
+		// o pior dos dois jeitos de errar.
+		for _, chave := range []string{
+			ChaveOIDCAudience, ChaveOIDCURLJWKS,
+			ChaveOIDCCacheJWKS, ChaveOIDCMargemRelogio, ChaveOIDCHTTPTimeout,
+		} {
+			if _, presente := getenv(chave); presente {
+				return OIDC{}, &ValidationError{
+					Field:  chave,
+					Reason: fmt.Sprintf("so faz sentido com %s, que nao foi informada", ChaveOIDCIssuer),
+				}
+			}
+		}
+		return OIDC{}, nil
+	}
+
+	audience, err := lerTextoObrigatorio(getenv, ChaveOIDCAudience)
+	if err != nil {
+		return OIDC{}, err
+	}
+
+	urlJWKS := issuer + caminhoPadraoJWKS
+	if bruta, presente := getenv(ChaveOIDCURLJWKS); presente {
+		if strings.TrimSpace(bruta) == "" {
+			return OIDC{}, &ValidationError{
+				Field:  ChaveOIDCURLJWKS,
+				Reason: "a variavel esta presente e vazia; remova a linha para derivar do issuer, ou informe a URL completa",
+			}
+		}
+		urlJWKS = strings.TrimSpace(bruta)
+	}
+
+	cache, err := lerDuracao(getenv, ChaveOIDCCacheJWKS, cacheJWKSPadrao)
+	if err != nil {
+		return OIDC{}, err
+	}
+	margem, err := lerDuracao(getenv, ChaveOIDCMargemRelogio, margemDeRelogioPadrao)
+	if err != nil {
+		return OIDC{}, err
+	}
+	timeout, err := lerDuracao(getenv, ChaveOIDCHTTPTimeout, httpTimeoutOIDC)
+	if err != nil {
+		return OIDC{}, err
+	}
+
+	return OIDC{
+		Issuer:          issuer,
+		Audience:        audience,
+		URLJWKS:         urlJWKS,
+		CacheJWKS:       cache,
+		MargemDeRelogio: margem,
+		HTTPTimeout:     timeout,
+	}, nil
+}
+
+// lerTextoObrigatorio le um texto que nao pode faltar.
+func lerTextoObrigatorio(getenv func(string) (string, bool), chave string) (string, error) {
+	bruto, definido := getenv(chave)
+	bruto = strings.TrimSpace(bruto)
+
+	if bruto == "" {
+		motivo := "a variavel e obrigatoria"
+		if definido {
+			motivo = "a variavel esta presente e vazia"
+		}
+		return "", &ValidationError{Field: chave, Reason: motivo}
+	}
+	return bruto, nil
 }
 
 func lerEndereco(getenv func(string) (string, bool)) (string, error) {
