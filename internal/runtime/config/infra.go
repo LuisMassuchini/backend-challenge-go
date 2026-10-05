@@ -16,6 +16,7 @@ const (
 	ChaveSQSDiretorio      = "WAGER_SQS_ENDPOINT"
 	ChaveSQSFilaOperacoes  = "WAGER_SQS_FILA_OPERACOES"
 	ChaveSQSFilaDeadLetter = "WAGER_SQS_FILA_DEAD_LETTER"
+	ChaveSQSFilaEventos    = "WAGER_SQS_FILA_EVENTOS"
 	ChaveSQSVisaoTimeout   = "WAGER_SQS_VISIBILITY_TIMEOUT"
 	ChaveSQSRecebimentoMax = "WAGER_SQS_RECEIVE_COUNT_MAX"
 	ChaveSQSLoteMax        = "WAGER_SQS_LOTE_MAX"
@@ -48,6 +49,15 @@ type SQS struct {
 
 	// FilaDeadLetter e a fila de cartao morto.
 	FilaDeadLetter string
+
+	// FilaEventos e a fila FIFO de saida dos eventos de integracao.
+	//
+	// E separada da fila de operacoes porque e outro contrato: ali entra comando de
+	// jogo, aqui sai envelope de evento com eventId estavel. Um relay que publicasse
+	// evento na fila de operacoes entregaria ao consumidor de operacoes algo que ele
+	// nao sabe ler, e a falha apareceria como mensagem malformada em vez de como
+	// problema de topologia.
+	FilaEventos string
 
 	// VisaoTimeout e por quanto tempo a mensagem some para os demais consumidores
 	// depois de recebida.
@@ -152,8 +162,8 @@ func lerSQS(getenv func(string) (string, bool)) (SQS, error) {
 			}
 		}
 		for _, chave := range []string{
-			ChaveSQSFilaOperacoes, ChaveSQSFilaDeadLetter, ChaveSQSVisaoTimeout,
-			ChaveSQSRecebimentoMax, ChaveSQSLoteMax,
+			ChaveSQSFilaOperacoes, ChaveSQSFilaDeadLetter, ChaveSQSFilaEventos,
+			ChaveSQSVisaoTimeout, ChaveSQSRecebimentoMax, ChaveSQSLoteMax,
 		} {
 			if _, presente := getenv(chave); presente {
 				return SQS{}, &ValidationError{
@@ -173,12 +183,17 @@ func lerSQS(getenv func(string) (string, bool)) (SQS, error) {
 	if err != nil {
 		return SQS{}, err
 	}
+	eventos, err := lerTexto(getenv, ChaveSQSFilaEventos, "wager-events.fifo")
+	if err != nil {
+		return SQS{}, err
+	}
 
-	// As duas filas sao FIFO por nome. Um sufixo diferente transforma a fila em
+	// As tres filas sao FIFO por nome. Um sufixo diferente transforma a fila em
 	// padrao, e a FIFO e o que da ordem por chave de particao e a deduplicacao.
 	for _, nome := range []struct{ chave, valor string }{
 		{ChaveSQSFilaOperacoes, fila},
 		{ChaveSQSFilaDeadLetter, cartaoMorto},
+		{ChaveSQSFilaEventos, eventos},
 	} {
 		if !strings.HasSuffix(nome.valor, ".fifo") {
 			return SQS{}, &ValidationError{
@@ -205,6 +220,7 @@ func lerSQS(getenv func(string) (string, bool)) (SQS, error) {
 		Endpoint:       endpoint,
 		FilaOperacoes:  fila,
 		FilaDeadLetter: cartaoMorto,
+		FilaEventos:    eventos,
 		VisaoTimeout:   visao,
 		RecebimentoMax: recebimentos,
 		LoteMax:        int32(lote),
