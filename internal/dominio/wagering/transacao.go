@@ -324,6 +324,20 @@ func Registrar(r Registro) (Transacao, error) {
 }
 
 func validarRegistro(r Registro) error {
+	// OPENING e interna. A recusa vem antes de qualquer outra verificacao porque
+	// o tipo invalido aqui nao e entrada malformada: e um provedor tentando
+	// executar uma operacao que so o servico interno pode executar, e a resposta
+	// precisa dizer isso com o codigo proprio.
+	if r.Tipo == TipoAbertura {
+		return fmt.Errorf(
+			"%w: %w", ErrTipoNaoSuportado,
+			&FalhaDeRegra{
+				Codigo: CodigoFalhaTipoNaoSuportado,
+				Motivo: "OPENING e reservado a abertura interna de carteira",
+			},
+		)
+	}
+
 	if !r.Provedor.Valida() {
 		return fmt.Errorf("%w: provedor ausente", ErrRegistroInvalido)
 	}
@@ -371,7 +385,14 @@ func Reidratar(d Dados) (Transacao, error) {
 	if !d.Estado.Valido() {
 		return Transacao{}, fmt.Errorf("%w: estado %q", ErrEstadoInvalido, d.Estado)
 	}
-	if err := validarRegistro(Registro{
+	// Uma abertura nao tem identidade externa. Aceitar uma no reidratar
+	// admitiria registro vindo de backup adulterado em que a abertura tem
+	// provedor e chave, que e a forma mais direta de duplicar credito inicial.
+	if d.Tipo == TipoAbertura {
+		if err := conferirOrigemInterna(d); err != nil {
+			return Transacao{}, err
+		}
+	} else if err := validarRegistro(Registro{
 		Provedor:          d.Provedor,
 		TransacaoExterna:  d.TransacaoExterna,
 		ChaveIdempotencia: d.ChaveIdempotencia,
@@ -411,6 +432,56 @@ func Reidratar(d Dados) (Transacao, error) {
 		criadaEm:          d.CriadaEm,
 		atualizadaEm:      d.AtualizadaEm,
 	}, nil
+}
+
+// conferirOrigemInterna garante que uma transacao de origem interna nao carrega
+// identidade externa.
+//
+// E o reflexo, na leitura, da regra que recusa OPENING na entrada: os dois lados
+// da mesma invariante. Sem ela, o schema aceitaria um OPENING com provedor, e a
+// constraint que impede credito inicial duplicado teria que confiar no codigo de
+// aplicacao em vez do dado.
+func conferirOrigemInterna(d Dados) error {
+	if !d.Carteira.Valida() {
+		return fmt.Errorf("%w: carteira ausente", ErrRegistroInvalido)
+	}
+	if !d.Jogador.Valida() {
+		return fmt.Errorf("%w: jogador ausente", ErrRegistroInvalido)
+	}
+	if err := d.Valor.Validar(); err != nil {
+		return fmt.Errorf("valor: %w", err)
+	}
+	if d.CriadaEm.IsZero() {
+		return fmt.Errorf("%w: instante de criacao ausente", ErrRegistroInvalido)
+	}
+
+	var indevida []string
+	if d.Provedor.Valida() {
+		indevida = append(indevida, fmt.Sprintf("provedor %q", d.Provedor))
+	}
+	if d.TransacaoExterna.Valida() {
+		indevida = append(indevida, fmt.Sprintf("transacao externa %q", d.TransacaoExterna))
+	}
+	if d.ChaveIdempotencia.Valida() {
+		indevida = append(indevida, fmt.Sprintf("chave %q", d.ChaveIdempotencia))
+	}
+	if d.HashConteudo.Valida() {
+		indevida = append(indevida, fmt.Sprintf("hash %q", d.HashConteudo))
+	}
+	if d.Rodada.Valida() {
+		indevida = append(indevida, fmt.Sprintf("rodada %q", d.Rodada))
+	}
+	if d.Jogo.Valida() {
+		indevida = append(indevida, fmt.Sprintf("jogo %q", d.Jogo))
+	}
+	if !d.Referencia.Vazia() {
+		indevida = append(indevida, "referencia")
+	}
+	if len(indevida) > 0 {
+		return fmt.Errorf("%w: OPENING com identidade externa: %s", ErrRegistroInvalido, strings.Join(indevida, ", "))
+	}
+
+	return nil
 }
 
 // conferirEstadoEDados garante que os dados acompanham o estado.
