@@ -220,6 +220,41 @@ operacao.
 reprocessamento original, e nao o saldo atual: recalcular devolveria a resposta de
 hoje para uma operacao de ontem.
 
+### A corrida da idempotencia: por que `ON CONFLICT DO NOTHING`
+
+Este foi o defeito mais caro do projeto, e ele **so apareceu com tres processos**.
+
+A resolucao de idempotencia tem tres passos em sequencia: procurar a chave, procurar o
+par provedor e identificador externo, e entao gravar. Entre a busca e a gravacao
+existe uma janela, e com tres instancias independentes a janela e real: A e B passam
+as duas buscas vendo a chave como nova, A grava, e B chega no `INSERT` e leva
+violacao do indice unico.
+
+**O que o codigo devolvia nessa hora:** o erro do `INSERT`, traduzido para
+`ErrConflitoDeChave`, que a borda traduz para 409. O provedor recebia conflito numa
+operacao que ele acabara de repetir sem mudar um byte do conteudo. A operacao nao
+duplicava, o ledger estava certo, e mesmo assim o provedor ficava proibido de repetir
+-- que e o eliminatorio "movimentacao duplicada" pela porta do lado oposto: o dinheiro
+nao move duas vezes, mas o cliente nunca consegue concluir a aposta.
+
+**Por que savepoint nao resolvia:** no PostgreSQL, um `INSERT` que viola indice unico
+**aborta a transacao inteira**, e depois dele todo comando responde `current
+transaction is aborted`. Nenhum savepoint evita isso: o savepoint protege contra erro
+de *comando*, nao contra o estado de erro que o comando deixa. Tentar tratar o conflito
+com savepoint chegou a `25P02` em quatro de cinquenta envios -- exatamente os que
+perderam a corrida.
+
+**A solucao:** `InserirSeNova` usa `ON CONFLICT DO NOTHING`, que nao aborta nada e
+devolve zero linhas. Zero linhas e o conflito, uma linha e o caminho normal, e quem
+chama distinguish os dois. O perdedor da corrida entao **rele o registro vencedor** e
+compara o hash com o do comando: hash igual e reentrega e devolve o resultado
+persistido; hash diferente e conflito de verdade e devolve 409.
+
+O silencio do `DO NOTHING` nao esconde o conflito -- e a contagem de linhas que o
+revela. E a razao de o `Inserir` original continuar sendo `INSERT` comum: ali conflito
+e erro que o chamador precisa sentir, e transformar o unico `DO NOTHING` do
+idempotencia em algo silencioso seria trocar um defeito conhecido por um pior.
+
 ---
 
 ## Transacoes e maquina de estados

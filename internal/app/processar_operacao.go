@@ -174,8 +174,21 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		if err != nil {
 			return traduzirFalhaDeRegra(err)
 		}
-		if err := s.Transacoes.Inserir(ctx, q, transacao); err != nil {
+
+		// O `ON CONFLICT DO NOTHING` e o que torna a corrida segura: um `INSERT` comum que
+		// perde a corrida aborta a transacao, e a releitura do registro vencedor -- que e
+		// o que separa reentrega de conflito -- ficaria impossivel.
+		//
+		// As duas buscas de idempotencia acima viram a chave como nova, e cada uma delas
+		// viu isso em um instante legitimo. Entre elas, outra instancia gravou a mesma
+		// operacao. `InserirSeNova` devolve `false` nesse caso, e o caminho abaixo rel o
+		// vencedor em vez de devolver conflito.
+		gravada, err := s.Transacoes.InserirSeNova(ctx, q, transacao)
+		if err != nil {
 			return err
+		}
+		if !gravada {
+			return s.resolverConflitoDeChave(ctx, q, req, &resposta)
 		}
 
 		carteira, err := s.Carteiras.LerParaAtualizar(ctx, q, req.Carteira)
@@ -243,6 +256,42 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		s.Metricas.ObservaOperacao(inicio, string(resposta.Estado))
 	}
 	return resposta, nil
+}
+
+// resolverConflitoDeChave trata a perda da corrida do INSERT.
+//
+// A releitura e o que separa reentrega de conflito: quem ganhou a corrida ja gravou o
+// conteudo, e comparar o hash guardado com o do comando decide se era a mesma operacao
+// ou outra com a mesma chave. Sem a releitura, a unica informacao disponivel e "alguem
+// gravou antes", e essa informacao nao distingue os dois casos.
+//
+// A releitura pode nao encontrar a linha: quem ganhou a corrida ainda pode estar com a
+// transacao aberta, e o `INSERT` desta so espera o indice unico, nao o commit da outra.
+// Devolver "reprocessar depois" e o desfecho honesto -- a reentrega do provedor vai
+// encontrar a linha ja confirmada.
+func (s Servicos) resolverConflitoDeChave(
+	ctx context.Context,
+	q pg.Querente,
+	req RequisicaoOperacao,
+	resposta *RespostaOperacao,
+) error {
+	existente, err := s.Transacoes.BuscarPorChave(ctx, q, req.Chave)
+	if err != nil {
+		if errors.Is(err, pg.ErrNaoEncontrado) {
+			// Quem gravou ainda nao confirmou. O `ON CONFLICT` esperou o indice unico, e
+			// o indice so e liberado quando a transacao da outra instancia confirma; a
+			// linha pode ter sumido se ela tiverabortado entre resolver o indice e
+			// confirmar. A transacao deste comando foi desfeita junto com a unidade, e o
+			// provedor reenviando encontra o resultado. Devolver 409 aqui seria mentira.
+			return fmt.Errorf("%w: a operacao com a chave %q esta sendo gravada por outra instancia",
+				pg.ErrConflitoDeVersao, req.Chave)
+		}
+		return fmt.Errorf("idempotencia apos conflito: %w", err)
+	}
+
+	s.registraDuplicata("corrida")
+	*resposta, err = responderReplay(existente, req)
+	return err
 }
 
 // confirmar grava o desfecho na unidade.
