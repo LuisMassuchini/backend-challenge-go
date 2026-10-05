@@ -66,8 +66,23 @@ var (
 	ErrEscalaExcedida = errors.New("money: escala decimal excedida")
 	// ErrMoedaInvalida cobre codigo fora do catalogo.
 	ErrMoedaInvalida = errors.New("money: moeda invalida")
+	// ErrMoedaIncompativel cobre aritmetica ou comparacao entre moedas distintas.
+	ErrMoedaIncompativel = errors.New("money: moedas incompativeis")
 	// ErrInvalido cobre o valor zero de Money, que nao tem moeda.
 	ErrInvalido = errors.New("money: valor nao inicializado")
+	// ErrOverflow cobre valor fora do intervalo de int64 em unidade minima.
+	ErrOverflow = errors.New("money: overflow")
+)
+
+// Limites do valor em unidade minima.
+//
+// maxInt64 em unidade minima e 92233720368547758.07: 92.228.986.143.402.547,07
+// unidades. E o teto do sistema, e ele e grande de proposito -- nenhum saldo
+// real chega perto, e um limite artificial mais baixo criaria a chance de um
+// valor legitimo ser recusado em producao.
+const (
+	maxInt64 = int64(^uint64(0) >> 1)
+	minInt64 = -maxInt64 - 1
 )
 
 // Money e um valor monetario imutavel.
@@ -116,7 +131,7 @@ func (m Money) Validar() error {
 
 // Parse le um valor monetario de string decimal.
 //
-// A gramática aceita e apenas esta forma:
+// A gramatica aceita e apenas esta forma:
 //
 //	["-"] digitos+"." digitos{1,2}
 //
@@ -246,3 +261,93 @@ func magnitudeDe(amount int64) uint64 {
 	// -(amount+1) + 1 funciona para MinInt64, que nao tem oposto em int64.
 	return uint64(-(amount + 1)) + 1
 }
+
+// ValidarMoeda exige que o outro valor seja da mesma moeda.
+//
+// E um metodo publico e separado porque e a unica forma de aplicar a regra de
+// compatibilidade em uma operacao que nao devolve erro, como Equal. Sem ele, o
+// chamador de Equal receberia false para moeda diferente e para valor diferente,
+// e nao teria como distinguir as duas coisas sem ler a moeda dos dois lados.
+func (m Money) ValidarMoeda(outro Money) error {
+	if err := m.Validar(); err != nil {
+		return err
+	}
+	if err := outro.Validar(); err != nil {
+		return fmt.Errorf("operando: %w", err)
+	}
+	if m.currency != outro.currency {
+		return fmt.Errorf("%w: %s e %s", ErrMoedaIncompativel, m, outro)
+	}
+	return nil
+}
+
+// Add soma dois valores da mesma moeda.
+//
+// O resultado e um novo Money: Money e imutavel, e quem chama precisa perceber
+// que o valor original nao mudou. Uma aritmetica que altera o receptor faria o
+// valor persistido no ledger depender da ordem em que o codigo foi chamado.
+func (m Money) Add(outro Money) (Money, error) {
+	if err := m.ValidarMoeda(outro); err != nil {
+		return Money{}, err
+	}
+	return Money{amount: m.amount + outro.amount, currency: m.currency}, nil
+}
+
+// Sub subtrai dois valores da mesma moeda.
+//
+// O resultado pode ser negativo, e isso e correto no dominio: e assim que se
+// calcula o saldo projetado antes de decidir se o debito cabe na carteira. Saldo
+// negativo e proibido no agregado da carteira, e nao aqui.
+func (m Money) Sub(outro Money) (Money, error) {
+	if err := m.ValidarMoeda(outro); err != nil {
+		return Money{}, err
+	}
+	return Money{amount: m.amount - outro.amount, currency: m.currency}, nil
+}
+
+// Neg devolve o valor com o sinal invertido.
+//
+// Devolve erro em vez de transbordar em silencio; ver NegChecked, que e o
+// mesmo comportamento com o nome explicito.
+func (m Money) Neg() (Money, error) {
+	if err := m.Validar(); err != nil {
+		return Money{}, err
+	}
+	if m.amount == minInt64 {
+		return Money{}, fmt.Errorf("%w: %s nao tem oposto em int64", ErrOverflow, m)
+	}
+	return Money{amount: -m.amount, currency: m.currency}, nil
+}
+
+// Compare devolve -1, 0 ou 1 conforme a ordem entre os dois valores.
+//
+// Devolve erro para moeda incompativel em vez de devolver 0. Devolver 0 faria
+// "sao iguais" ser a resposta para uma operacao sem significado.
+func (m Money) Compare(outro Money) (int, error) {
+	if err := m.ValidarMoeda(outro); err != nil {
+		return 0, err
+	}
+	switch {
+	case m.amount < outro.amount:
+		return -1, nil
+	case m.amount > outro.amount:
+		return 1, nil
+	}
+	return 0, nil
+}
+
+// Equal informa se os dois valores tem o mesmo valor e a mesma moeda.
+//
+// Nao devolve erro: para o caso em que a moeda e declarada no tipo e conhecida
+// pela borda, o valor False ja responde a pergunta. Para quem precisa da
+// distincao entre valor diferente e moeda incompativel, existe ValidarMoeda.
+func (m Money) Equal(outro Money) bool {
+	return m.currency.Valida() && outro.currency.Valida() &&
+		m.currency == outro.currency && m.amount == outro.amount
+}
+
+// IsNegative informa se o valor e menor que zero.
+func (m Money) IsNegative() bool { return m.amount < 0 }
+
+// IsPositive informa se o valor e maior que zero.
+func (m Money) IsPositive() bool { return m.amount > 0 }
