@@ -100,8 +100,12 @@ test-race-docker: ## Executa a suite com detector de corrida na imagem oficial d
 # Os testes de integracao rodam contra o PostgreSQL do Compose, com a tag
 # `integration`. A tag existe para que `go test ./...` continue sendo um portao
 # lento e sem dependencia: quem so quer verificar codigo nao precisa de container.
+#
+# `-p 1` e obrigatorio, e nao uma preferencia. Os pacotes de teste compartilham o
+# mesmo banco e cada um limpa as tabelas no inicio; em paralelo, um pacote apaga o
+# dado que o outro esta usando, e a falha aparece em um teste que passou sozinho.
 test-integration: ## Executa os testes de integracao contra o Postgres do Compose
-	$(GO) test -tags=integration -count=1 ./tests/integration/...
+	$(GO) test -tags=integration -p 1 -count=1 ./tests/integration/...
 
 migrations-up: ## Aplica as migrations pendentes
 	$(GO) run ./cmd/migrate up
