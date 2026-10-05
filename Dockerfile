@@ -31,9 +31,28 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -o /out/wager-service \
       ./cmd/wager-service
 
+# O binario de migration viaja na MESMA imagem, e nao em uma imagem separada.
+#
+# O Compose sobe a migration e a aplicacao em servicos diferentes, com o segundo
+# depending_on do primeiro. Duas imagens custariam um segundo build e uma segunda
+# copia de todo o codigo para um executavel de duas telas; a imagem final e a
+# mesma, e o que muda e o `entrypoint` de cada servico.
+#
+# As migrations tambem ficam dentro de `internal`, em `internal/pg/migrations`, e
+# sao embutidas no binario por `//go:embed`. E por isso que a imagem precisa do
+# codigo em tempo de build e nao de um volume com os arquivos `.sql` em tempo de
+# execucao: o esquema viaja junto com o binario que o aplica, e nao pode divergir
+# dele.
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags "-s -w" \
+      -o /out/migrate \
+      ./cmd/migrate
+
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build /out/wager-service /wager-service
+COPY --from=build /out/migrate /migrate
 
 USER nonroot:nonroot
 
