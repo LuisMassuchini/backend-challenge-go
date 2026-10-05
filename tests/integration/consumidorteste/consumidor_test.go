@@ -12,9 +12,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,7 +80,7 @@ type ambiente struct {
 	parar func()
 }
 
-// novoAmbiente sobe o consumidor contra a fila real.
+// novoAmbiente sobe o consumidor contra a fila real, com a fila vazia.
 func novoAmbiente(t *testing.T) *ambiente {
 	t.Helper()
 
@@ -86,6 +88,22 @@ func novoAmbiente(t *testing.T) *ambiente {
 	// deixada pelo teste anterior seria consumida aqui e o resultado passaria a
 	// depender da ordem de execucao.
 	limpar(t)
+
+	return montarAmbiente(t, nil)
+}
+
+// montarAmbiente sobe um consumidor sem tocar na fila.
+//
+// A separacao existe porque `limpar` esvazia a fila, e um teste que precisa de uma
+// mensagem especifica ja na fila nao pode passar por aqui: `limpar` receberia e apagaria
+// a propria mensagem que o teste precisa ver ser reentregue, e o teste passaria sem
+// exercitar a reentrega.
+//
+// O parametro `filaInjetada` e nil no caso comum. Quando vem preenchido, o worker roda
+// contra ela e `ambiente.fila` continua sendo o cliente real, para o proprio teste usar
+// nas verificacoes.
+func montarAmbiente(t *testing.T, filaInjetada consumidor.Fila) *ambiente {
+	t.Helper()
 
 	pool, err := pg.AbrirPool(contexto(t), dsnRuntime, pg.Opcoes{MaxConexoes: 16})
 	if err != nil {
@@ -105,6 +123,11 @@ func novoAmbiente(t *testing.T) *ambiente {
 		t.Fatalf("cliente da fila: %v", err)
 	}
 
+	daFila := filaInjetada
+	if daFila == nil {
+		daFila = fila
+	}
+
 	servicos := app.Servicos{
 		Unidade:    pg.NovaUnidade(pool),
 		Carteiras:  pg.NovaRepositorioCarteira(),
@@ -117,7 +140,7 @@ func novoAmbiente(t *testing.T) *ambiente {
 	}
 
 	worker := consumidor.Novo(consumidor.Dependencias{
-		Fila:               fila,
+		Fila:               daFila,
 		Servicos:           servicos,
 		Lote:               10,
 		Ocioso:             200 * time.Millisecond,
@@ -589,8 +612,244 @@ func TestDeduplicacaoDaFilaBloqueiaAMesmaChaveDeDeduplicacao(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// O cenario 5 do enunciado
+// ---------------------------------------------------------------------------
+
+// filaQueFalhaNoApagar falha a primeira remocao e delega as demais.
+//
+// O que ela simula e o ESTADO DURAVEL de um consumidor interrompido depois do commit e
+// antes do `DeleteMessage`: o commit esta confirmado no banco e a mensagem continua na
+// fila.
+//
+// Nao ha processo morto aqui, e o teste nao finge que ha. Ele injeta a falha no ponto
+// exato em que ela acontece, o que produz o mesmo estado que um crash produziria -- e o
+// estado e a unica coisa que a garantia depende. Um teste que rodasse `kill` nesse
+// intervalo seria instavel: entre o commit e o apagamento ha poucas linhas de log e
+// metrica, e o acerto seria sorte.
+type filaQueFalhaNoApagar struct {
+	*sqs.Cliente
+
+	umaVez sync.Once
+	avisou chan struct{}
+}
+
+// Concluir falha na primeira chamada e delega depois.
+//
+// O `sync.Once` marca a primeira chamada, entao `falhou` e verdadeiro so nela. Delegar
+// depois e necessario porque a propria limpeza do teste pode precisar apagar mensagem.
+func (f *filaQueFalhaNoApagar) Concluir(ctx context.Context, recibo string) error {
+	falhou := false
+	f.umaVez.Do(func() {
+		falhou = true
+		close(f.avisou)
+	})
+	if falhou {
+		return errors.New("sqs: apagando a mensagem: interrompido entre o commit e a remocao")
+	}
+	return f.Cliente.Concluir(ctx, recibo)
+}
+
+// filaQueContaConclusoes conta as remocoes que deram certo.
+//
+// Existe para que o teste prove que a segunda instancia realmente consumiu a mensagem
+// reentregue, e nao apenas que o saldo ficou certo. Sem essa contagem, um saldo correto
+// seria compativel com "ninguem consumiu nada" -- por exemplo, se a segunda instancia
+// subisse tarde demais e o teste expirasse sem perceber.
+type filaQueContaConclusoes struct {
+	*sqs.Cliente
+
+	conclusoes atomic.Int32
+}
+
+func (f *filaQueContaConclusoes) Concluir(ctx context.Context, recibo string) error {
+	if err := f.Cliente.Concluir(ctx, recibo); err != nil {
+		return err
+	}
+	f.conclusoes.Add(1)
+	return nil
+}
+
+// Uma mensagem cujo apagamento falhou depois do commit volta para a fila, e a outra
+// instancia a consome sem mover dinheiro de novo.
+//
+// A cadeia completa que este teste cobre:
+//
+//  1. a primeira instancia consome e confirma o commit (saldo 100 -> 75);
+//  2. a remocao da mensagem falha, e a mensagem continua na fila;
+//  3. a primeira instancia e PARADA, para que quem reentregue nao seja ela;
+//  4. quando o timeout de visibilidade expira, a segunda instancia recebe a mensagem;
+//  5. a segunda instancia reconhece a operacao como ja processada, devolve o resultado
+//     persistido e apaga a mensagem.
+//
+// O que prova a garantia: o dinheiro nao se move duas vezes. O que prova alem disso: o
+// passo 3, porque sem ele o passo 4 seria feito pela propria primeira instancia e o
+// teste passaria sem provar que outra processo consegue retomar o trabalho.
+func TestMensagemComApagamentoFalhoEReentregadaSemMoverDinheiroDuasVezes(t *testing.T) {
+	dbtest.Limpa(t)
+
+	// A fila NAO pode ser esvaziada aqui. `limpar` receberia e apagaria a mensagem que
+	// o teste precisa ver reentregue, e o teste passaria sem exercitar a reentrega.
+	filaQueFalha := &filaQueFalhaNoApagar{
+		Cliente: clienteDeOperacoes(t),
+		avisou:  make(chan struct{}),
+	}
+	primeira := montarAmbiente(t, filaQueFalha)
+
+	carteira := abrirCarteira(t, primeira.servicos, 10000)
+	publicar(t, primeira, mensagemDeOperacao(carteira, carteira.Jogador(),
+		"reentrega-1", "chave-reentrega", "BET", 2500, ""), carteira.ID().String())
+
+	// O passo 2: a primeira instancia confirmou o commit e nao conseguiu apagar a
+	// mensagem. O aviso fecha no exato instante em que o apagamento falha.
+	esperarSinal(t, filaQueFalha.avisou, "o apagamento da mensagem falhar", 30*time.Second)
+
+	// O dinheiro ja foi movido uma vez, apesar do apagamento ter falhado. E o que
+	// mostra que o commit veio antes da falha -- e nao o contrario.
+	if got := saldoDa(t, primeira.servicos, carteira); got != "75.00" {
+		t.Fatalf("saldo apos o commit e %s, esperado 75.00 antes mesmo de a remocao falhar", got)
+	}
+	if got := contarLancamentos(t); got != 2 {
+		t.Fatalf("lancamentos apos o commit: %d, esperado 2 (o credito da abertura e o debito da aposta)", got)
+	}
+
+	// O passo 3, e ele e o que faz o teste valer. Parar a primeira instancia aqui e
+	// obrigatorio: se ela continuar viva, ela reentrega a mensagem ela mesma quando a
+	// visibilidade expira, e o passo 4 acontece com o processo que ja tinha commitado
+	// -- o que nao prova que outra instancia retoma.
+	primeira.parar()
+
+	// O passo 4: a segunda instancia sobe sem esvaziar a fila e espera a visibilidade
+	// expirar. Os 60s sao reais, e por isso o contexto deste arquivo tem tres minutos.
+	filaQueConta := &filaQueContaConclusoes{Cliente: clienteDeOperacoes(t)}
+	segunda := montarAmbiente(t, filaQueConta)
+
+	esperarConclusoes(t, filaQueConta, 1, 90*time.Second)
+
+	// O passo 5, verificado pelo estado financeiro: um debito so.
+	if got := saldoDa(t, segunda.servicos, carteira); got != "75.00" {
+		t.Errorf("saldo depois da reentrega e %s, esperado 75.00: a reentrega moveu dinheiro de novo", got)
+	}
+	if got := contarLancamentos(t); got != 2 {
+		t.Errorf("lancamentos depois da reentrega: %d, esperado 2: a reentrega debitou de novo", got)
+	}
+	if got := contarTransacoesBET(t); got != 1 {
+		t.Errorf("transacoes BET: %d, esperado 1: a reentrega criou uma segunda transacao", got)
+	}
+
+	// A inbox e a garantia que impede o debito duplicado, entao ela precisa estar
+	// registrada. Uma linha por `message_id`, nunca duas: a reentrega tenta registrar
+	// de novo e o `ON CONFLICT DO NOTHING` absorve.
+	if duplicadas := inboxComMensagemRepetida(t); duplicadas != 0 {
+		t.Errorf("a inbox tem %d mensagem(es) com mais de uma linha, e deveria ter uma por messageId", duplicadas)
+	}
+	if total := contarMensagensNaInbox(t); total == 0 {
+		t.Error("a inbox esta vazia: a mensagem consumida da fila nunca foi registrada")
+	}
+	if concluidas := inboxConcluidas(t); concluidas != contarMensagensNaInbox(t) {
+		t.Errorf("a inbox tem %d concluida(s) e %d registrada(s): o tratamento da reentrega nao foi concluido",
+			concluidas, contarMensagensNaInbox(t))
+	}
+
+	// E o fechamento: se o saldo gravado e o que o ledger implica, nenhuma das duas
+	// instancias mexeu no dinheiro duas vezes.
+	reconciliacao, err := app.Reconciliar(contexto(t), segunda.servicos, atorInterno(),
+		app.RequisicaoReconciliacao{Carteira: carteira.ID()})
+	if err != nil {
+		t.Fatalf("Reconciliar: %v", err)
+	}
+	if reconciliacao.Divergente {
+		t.Errorf("reconciliacao divergente: gravado %s, ledger %s",
+			reconciliacao.SaldoGravado.Decimal(), reconciliacao.SaldoDoLedger.Decimal())
+	}
+	if got := reconciliacao.Lancamentos; got != 2 {
+		t.Errorf("a reconciliacao contou %d lancamentos, esperado 2", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Metodos auxiliares de verificacao
 // ---------------------------------------------------------------------------
+
+// clienteDeOperacoes monta um cliente da fila de operacoes.
+func clienteDeOperacoes(t *testing.T) *sqs.Cliente {
+	t.Helper()
+
+	fila, err := sqs.Novo(contexto(t), sqs.Opcoes{
+		Endpoint:        endpointDoSqs(),
+		Regiao:          "us-east-1",
+		ChaveDeAcesso:   "test",
+		SegredoDeAcesso: "test",
+		FilaOperacoes:   "wager-transactions.fifo",
+		FilaDeadLetter:  "wager-transactions-dlq.fifo",
+	})
+	if err != nil {
+		t.Fatalf("cliente da fila: %v", err)
+	}
+	return fila
+}
+
+// esperarSinal espera um aviso com prazo.
+func esperarSinal(t *testing.T, sinal <-chan struct{}, descricao string, prazo time.Duration) {
+	t.Helper()
+
+	seletor := time.NewTimer(prazo)
+	defer seletor.Stop()
+
+	select {
+	case <-sinal:
+	case <-seletor.C:
+		t.Fatalf("%s nao aconteceu em %s", descricao, prazo)
+	}
+}
+
+// esperarConclusoes espera a fila ter removido ao menos N mensagens.
+//
+// O prazo e folgado de proposito: o caminho depende do timeout de visibilidade da fila,
+// que e de 60s e nao epressa do teste. Falhar por tempo aqui e o sinal honesto de que o
+// cenario nao se HOLD, e nao um teste que passou por acidente.
+func esperarConclusoes(t *testing.T, fila *filaQueContaConclusoes, minimo int, prazo time.Duration) {
+	t.Helper()
+
+	limite := time.Now().Add(prazo)
+	for time.Now().Before(limite) {
+		if int(fila.conclusoes.Load()) >= minimo {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("a fila removeu %d mensagem(ns) em %s, esperado ao menos %d: ninguem consumiu a mensagem reentregue",
+		fila.conclusoes.Load(), prazo, minimo)
+}
+
+// inboxComMensagemRepetida conta quantos `messageId` tem mais de uma linha na inbox.
+func inboxComMensagemRepetida(t *testing.T) int {
+	t.Helper()
+
+	linhas := consultar(t,
+		`SELECT message_id FROM inbox_messages GROUP BY message_id HAVING count(*) > 1`)
+	return len(linhas)
+}
+
+// contarMensagensNaInbox devolve quantas linhas a inbox tem.
+func contarMensagensNaInbox(t *testing.T) int {
+	t.Helper()
+
+	linhas := consultar(t, `SELECT message_id FROM inbox_messages`)
+	return len(linhas)
+}
+
+// inboxConcluidas devolve quantas mensagens da inbox tem `completed_at` preenchido.
+//
+// Preenchido significa "esta mensagem ja produziu efeito", que e a unica conclusao
+// duravel que o consumidor precisa deixar. Uma inbox com a linha criada e sem
+// `completed_at` e o estado de reentrega -- e, num cenario que termina em replay, um
+// sinal de que o tratamento nunca foi concluido.
+func inboxConcluidas(t *testing.T) int {
+	t.Helper()
+
+	linhas := consultar(t, `SELECT message_id FROM inbox_messages WHERE completed_at IS NOT NULL`)
+	return len(linhas)
+}
 
 // esperarFilaVazia espera a fila ficar sem mensagem visivel.
 func esperarFilaVazia(t *testing.T, a *ambiente) {
@@ -664,7 +923,14 @@ func contarTransacoesBET(t *testing.T) int {
 func contexto(t *testing.T) context.Context {
 	t.Helper()
 
-	ctx, cancelar := context.WithTimeout(context.Background(), 60*time.Second)
+	// Tres minutos, e nao um minuto. O cenario 5 espera o timeout de visibilidade da
+	// fila, que sao sessenta segundos, para a mensagem voltar a ser visivel -- e a
+	// espera e real, nao simulada.
+	//
+	// O prazo deste contexto e o teto de uma operacao, e nao o prazo do teste: quem
+	// limita o teste sao os `time.Now().Add(...)` dos laco de espera, e subir este
+	// valor nao afrouxa nenhum deles.
+	ctx, cancelar := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancelar)
 	return ctx
 }
