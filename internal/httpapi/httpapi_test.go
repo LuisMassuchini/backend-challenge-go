@@ -1,0 +1,499 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/LuisMassuchini/backend-challenge-go/internal/app"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/auth"
+)
+
+// validadorFixo e um validador que devolve um ator sem consultar IdP.
+//
+// Existe para os testes de borda, que precisam exercitar status, cabecalhos e
+// traducao de erro. O comportamento do IdP de verdade e testado em
+// tests/integration/oidc, contra o Keycloak.
+type validadorFixo struct {
+	// ator e o que o token valido produz.
+	ator app.Ator
+
+	// erro e o que um token recusado produz.
+	erro error
+}
+
+func (v validadorFixo) Ator(_ context.Context, bruto string) (app.Ator, error) {
+	if v.erro != nil {
+		return app.Ator{}, v.erro
+	}
+	if bruto == "" {
+		return app.Ator{}, auth.ErrTokenAusente
+	}
+	return v.ator, nil
+}
+
+// servidorDeTeste sobe um roteador com as dependencias de borda.
+func servidorDeTeste(t *testing.T, v ValidadorDeToken) http.Handler {
+	t.Helper()
+	return NovoRoteador(Dependencias{Validador: v})
+}
+
+// requisicaoFaz dispara uma requisicao e devolve o gravador.
+func requisicaoFaz(
+	t *testing.T,
+	h http.Handler,
+	metodo, caminho, corpo string,
+	cabecalhos map[string]string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+
+	var leitor io.Reader
+	if corpo != "" {
+		leitor = strings.NewReader(corpo)
+	}
+	req := httptest.NewRequest(metodo, caminho, leitor)
+	if corpo != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for chave, valor := range cabecalhos {
+		req.Header.Set(chave, valor)
+	}
+
+	gravador := httptest.NewRecorder()
+	h.ServeHTTP(gravador, req)
+	return gravador
+}
+
+// O health check e publico. Um orquestrador nao tem token, e um probe que depende
+// de autenticacao so prova que o IdP esta de pe.
+func TestHealthChecksSaoPublicos(t *testing.T) {
+	h := servidorDeTeste(t, nil)
+
+	for _, caminho := range []string{"/health/live", "/health/ready"} {
+		resp := requisicaoFaz(t, h, http.MethodGet, caminho, "", nil)
+		if resp.Code != http.StatusOK {
+			t.Errorf("%s respondeu %d, esperado 200", caminho, resp.Code)
+		}
+	}
+}
+
+// Liveness nao consulta dependencia nenhuma. Um probe que checa banco derruba o
+// processo quando o banco cai, e o processo nao volta quando o banco volta.
+func TestLivenessNaoConsultaDependencia(t *testing.T) {
+	h := NovoRoteador(Dependencias{
+		Pronto: func(context.Context) error {
+			t.Fatal("o liveness consultou a dependencia")
+			return nil
+		},
+	})
+
+	if resp := requisicaoFaz(t, h, http.MethodGet, "/health/live", "", nil); resp.Code != http.StatusOK {
+		t.Errorf("liveness respondeu %d", resp.Code)
+	}
+}
+
+// Readiness e sobre poder atender, e nao sobre existir.
+func TestReadinessConsultaDependencia(t *testing.T) {
+	falhando := NovoRoteador(Dependencias{
+		Pronto: func(context.Context) error { return errors.New("banco fora") },
+	})
+	if resp := requisicaoFaz(t, falhando, http.MethodGet, "/health/ready", "", nil); resp.Code != http.StatusServiceUnavailable {
+		t.Errorf("readiness com dependencia fora respondeu %d, esperado 503", resp.Code)
+	}
+
+	pronto := NovoRoteador(Dependencias{
+		Pronto: func(context.Context) error { return nil },
+	})
+	if resp := requisicaoFaz(t, pronto, http.MethodGet, "/health/ready", "", nil); resp.Code != http.StatusOK {
+		t.Errorf("readiness pronto respondeu %d, esperado 200", resp.Code)
+	}
+}
+
+// Rota de negocio sem credencial e 401, e nunca 200.
+func TestRotaDeNegocioSemTokenE401(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	resp := requisicaoFaz(t, h, http.MethodPost, "/wallets", `{"playerId":"x"}`, nil)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("respondeu %d, esperado 401", resp.Code)
+	}
+
+	var corpo respostaErro
+	if err := json.Unmarshal(resp.Body.Bytes(), &corpo); err != nil {
+		t.Fatalf("corpo nao e JSON: %v", err)
+	}
+	if corpo.Erro != "credencial_ausente" {
+		t.Errorf("codigo de erro e %q", corpo.Erro)
+	}
+}
+
+// Credencial recusada pelo validador e 401.
+func TestTokenRecusadoE401(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{erro: auth.ErrTokenInvalido})
+
+	resp := requisicaoFaz(t, h, http.MethodPost, "/wallets", `{"playerId":"x"}`, map[string]string{
+		"Authorization": "Bearer qualquer",
+	})
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("respondeu %d, esperado 401", resp.Code)
+	}
+}
+
+// O esquema do header e conferido. "Basic", texto solto e "Bearer" sem token sao
+// ausencia de credencial.
+func TestEsquemaDoHeaderEConferido(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	casos := []string{"abc.def.ghi", "Basic abc", "Bearer", "Bearer   "}
+	for _, cabecalho := range casos {
+		resp := requisicaoFaz(t, h, http.MethodGet, "/wallets/"+uuid.NewString(), "", map[string]string{
+			"Authorization": cabecalho,
+		})
+		if resp.Code != http.StatusUnauthorized {
+			t.Errorf("Authorization %q respondeu %d, esperado 401", cabecalho, resp.Code)
+		}
+	}
+}
+
+// Sem validador montado a rota fica indisponivel, e nao aberta.
+func TestSemValidadorARotaNaoAbre(t *testing.T) {
+	h := servidorDeTeste(t, nil)
+
+	resp := requisicaoFaz(t, h, http.MethodPost, "/wallets", `{"playerId":"x"}`, map[string]string{
+		"Authorization": "Bearer qualquer",
+	})
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Errorf("respondeu %d, esperado 503", resp.Code)
+	}
+}
+
+// A correlacao volta na resposta, seja ela do cliente ou gerada.
+func TestCorrelacaoVoltaNaResposta(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Cliente: "wager-service"}})
+
+	// Informada pelo cliente.
+	resp := requisicaoFaz(t, h, http.MethodGet, "/health/live", "", map[string]string{
+		cabecalhoCorrelacao: "corr-123",
+	})
+	if resp.Header().Get(cabecalhoCorrelacao) != "corr-123" {
+		t.Errorf("correlacao informed nao voltou: %q", resp.Header().Get(cabecalhoCorrelacao))
+	}
+
+	// Gerada quando ausente: sem isso o log de uma requisicao que falha antes de
+	// qualquer identificador ficaria sem como casar com a resposta.
+	gerada := requisicaoFaz(t, h, http.MethodGet, "/health/live", "", nil)
+	if gerada.Header().Get(cabecalhoCorrelacao) == "" {
+		t.Error("correlacao ausente na resposta")
+	}
+}
+
+// A correlacao informada e limitada. Um cliente pode mandar um texto enorme e
+// transformar o identificador em entrada de log inutil.
+func TestCorrelacaoInformadaELimitada(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{})
+
+	enorme := strings.Repeat("a", 500)
+	resp := requisicaoFaz(t, h, http.MethodGet, "/health/live", "", map[string]string{
+		cabecalhoCorrelacao: enorme,
+	})
+
+	voltou := resp.Header().Get(cabecalhoCorrelacao)
+	if len(voltou) > 128 {
+		t.Errorf("correlacao de %d caracteres nao foi limitada", len(voltou))
+	}
+}
+
+// Um panic no handler vira 500 e nao derruba o processo. Um cliente que mande um
+// corpo que provoque panic derrubaria o servico inteiro.
+func TestPanicVira500(t *testing.T) {
+	rotas := http.NewServeMux()
+	rotas.HandleFunc("GET /explodir", func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	})
+	h := comMiddlewares(rotas)
+
+	gravador := httptest.NewRecorder()
+	h.ServeHTTP(gravador, httptest.NewRequest(http.MethodGet, "/explodir", nil))
+
+	if gravador.Code != http.StatusInternalServerError {
+		t.Errorf("respondeu %d, esperado 500", gravador.Code)
+	}
+}
+
+// A traducao de erro para status e o que o enunciado pede: entrada invalida,
+// conflito, recusa, pendencia e indisponivel sao distinguiveis.
+func TestTraducaoDeErrosFixaOContratoDeStatus(t *testing.T) {
+	casos := map[string]struct {
+		erro     error
+		esperado int
+		codigo   string
+	}{
+		"requisicao invalida": {
+			erro:     app.ErrRequisicaoInvalida,
+			esperado: http.StatusBadRequest,
+			codigo:   "requisicao_invalida",
+		},
+		"nao autorizado": {
+			erro:     app.ErrNaoAutorizado,
+			esperado: http.StatusForbidden,
+			codigo:   "nao_autorizado",
+		},
+		"provedor divergente": {
+			erro:     app.ErrProvedorDivergente,
+			esperado: http.StatusForbidden,
+			codigo:   "provedor_divergente",
+		},
+		"conflito de chave": {
+			erro:     app.ErrConflitoDeChave,
+			esperado: http.StatusConflict,
+			codigo:   "conflito",
+		},
+		"nao encontrado": {
+			erro:     errDeNaoEncontrado{},
+			esperado: http.StatusNotFound,
+			codigo:   "nao_encontrado",
+		},
+		"recusa de regra": {
+			erro: &app.FalhaDeRegra{
+				Codigo: "BET_SEM_SALDO",
+				Motivo: "saldo insuficiente",
+			},
+			esperado: http.StatusUnprocessableEntity,
+			codigo:   "regra_de_negocio_recusou",
+		},
+		"referencia ausente": {
+			// Pendencia nao e recusa: o trabalho foi aceito e sera retomado.
+			erro: &app.FalhaDeRegra{
+				Codigo: "REFERENCIA_NAO_ENCONTRADA",
+				Motivo: "referencia nao chegou",
+			},
+			esperado: http.StatusAccepted,
+			codigo:   "regra_de_negocio_recusou",
+		},
+		"erro interno": {
+			erro:     errors.New("qualquer"),
+			esperado: http.StatusInternalServerError,
+			codigo:   "erro_interno",
+		},
+	}
+
+	for nome, caso := range casos {
+		t.Run(nome, func(t *testing.T) {
+			status, corpo := classificarErro(caso.erro)
+			if status != caso.esperado {
+				t.Errorf("status e %d, esperado %d", status, caso.esperado)
+			}
+			if corpo.Erro != caso.codigo {
+				t.Errorf("codigo e %q, esperado %q", corpo.Erro, caso.codigo)
+			}
+			if corpo.Codigo != status {
+				t.Errorf("status no corpo e %d e no transporte %d", corpo.Codigo, status)
+			}
+		})
+	}
+}
+
+// A falha de regra carrega o codigo de dominio no corpo, para que o cliente
+// diferencie "payload errado" de "a regra recusou".
+func TestFalhaDeRegraCarregaOCodigoDeDominio(t *testing.T) {
+	_, corpo := classificarErro(&app.FalhaDeRegra{
+		Codigo: "ROLLBACK_SEM_SALDO",
+		Motivo: "sem saldo para desfazer o premio",
+	})
+
+	if corpo.CodigoDeFalha != "ROLLBACK_SEM_SALDO" {
+		t.Errorf("codigo de dominio e %q", corpo.CodigoDeFalha)
+	}
+	if corpo.Detalhe == "" {
+		t.Error("recusa sem detalhe para o humano")
+	}
+}
+
+// Toda requisicao responde JSON, inclusive a de erro. Um cliente que teve de tratar
+// dois formatos selon o status quebraria em producao.
+func TestErroRespondeJSON(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	resp := requisicaoFaz(t, h, http.MethodPost, "/wallets", "{nao e json", map[string]string{
+		"Authorization": "Bearer x",
+	})
+
+	if ct := resp.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type e %q", ct)
+	}
+	var corpo respostaErro
+	if err := json.Unmarshal(resp.Body.Bytes(), &corpo); err != nil {
+		t.Fatalf("corpo nao e JSON: %v", err)
+	}
+	if corpo.Erro == "" {
+		t.Error("erro sem codigo")
+	}
+}
+
+// Um corpo JSON invalido e 400, e nao 500. O problema e do cliente.
+func TestCorpoInvalidoE400(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	resp := requisicaoFaz(t, h, http.MethodPost, "/wallets", "{nao e json", map[string]string{
+		"Authorization": "Bearer x",
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("respondeu %d, esperado 400", resp.Code)
+	}
+}
+
+// Content-Type de outro formato e recusado antes da decodificacao.
+func TestContentTypeErradoERecusado(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	req := httptest.NewRequest(http.MethodPost, "/wallets",
+		strings.NewReader("playerId="+uuid.NewString()))
+	req.Header.Set("Authorization", "Bearer x")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	gravador := httptest.NewRecorder()
+	h.ServeHTTP(gravador, req)
+
+	if gravador.Code != http.StatusBadRequest {
+		t.Errorf("respondeu %d, esperado 400", gravador.Code)
+	}
+}
+
+// A rota de operacao exige a chave de idempotencia. Sem ela o servidor nao tem como
+// prometer que repetir nao move dinheiro duas vezes.
+func TestOperacaoSemChaveDeIdempotenciaE400(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	resp := requisicaoFaz(t, h, http.MethodPost, "/wagering/transactions", `{}`, map[string]string{
+		"Authorization": "Bearer x",
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("respondeu %d, esperado 400", resp.Code)
+	}
+
+	var corpo respostaErro
+	if err := json.Unmarshal(resp.Body.Bytes(), &corpo); err != nil {
+		t.Fatalf("corpo nao e JSON: %v", err)
+	}
+	if !strings.Contains(corpo.Detalhe, "Idempotency-Key") {
+		t.Errorf("o detalhe nao menciona a chave: %q", corpo.Detalhe)
+	}
+}
+
+// O provedor A nao le a operacao do provedor B. E a exposicao que a rota por provedor
+// poderia ter, e a resposta e 403 sem revelar se a operacao existe.
+func TestProvedorNaoLeOperacaoDeOutro(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{
+		Cliente:  "provider-a",
+		Provedor: "provider-a",
+	}})
+
+	resp := requisicaoFaz(t, h, http.MethodGet,
+		"/providers/provider-b/wagering/transactions/transaction-123", "", map[string]string{
+			"Authorization": "Bearer x",
+		})
+
+	if resp.Code != http.StatusForbidden {
+		t.Errorf("respondeu %d, esperado 403", resp.Code)
+	}
+}
+
+// O provedor A le a propria operacao pela rota por provedor. Chega a leitura, e a
+// leitura devolve 404 porque o dado nao existe.
+func TestProvedorLeOperacaoPropria(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{
+		Cliente:  "provider-a",
+		Provedor: "provider-a",
+	}})
+
+	// Sem servicos montados, o caso de uso falha na verificacao. O que importa aqui
+	// e que ele NAO respondeu 403: a autorizacao passou.
+	resp := requisicaoFaz(t, h, http.MethodGet,
+		"/providers/provider-a/wagering/transactions/transaction-123", "", map[string]string{
+			"Authorization": "Bearer x",
+		})
+	if resp.Code == http.StatusForbidden {
+		t.Error("o provedor foi recusado na propria rota")
+	}
+}
+
+// Um identificador de carteira malformado e 400, e nao 404 nem 500.
+func TestIdentificadorMalformadoE400(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	resp := requisicaoFaz(t, h, http.MethodGet, "/wallets/nao-e-uuid", "", map[string]string{
+		"Authorization": "Bearer x",
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("respondeu %d, esperado 400", resp.Code)
+	}
+}
+
+// Um limit malformado e 400. O limite vem do cliente e precisa ser conferido.
+func TestLimitMalformadoE400(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	resp := requisicaoFaz(t, h, http.MethodGet,
+		"/wallets/"+uuid.NewString()+"/ledger?limit=dez", "", map[string]string{
+			"Authorization": "Bearer x",
+		})
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("respondeu %d, esperado 400", resp.Code)
+	}
+}
+
+// Um cursor quebrado e 400 e nao pagina vazia: devolver vazio para um cursor
+// invalido faria o cliente receber a primeira pagina sem saber que o resultado
+// estava errado.
+func TestCursorInvalidoE400(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	resp := requisicaoFaz(t, h, http.MethodGet,
+		"/wallets/"+uuid.NewString()+"/ledger?cursor=%%nao-base64", "", map[string]string{
+			"Authorization": "Bearer x",
+		})
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("respondeu %d, esperado 400", resp.Code)
+	}
+}
+
+// Uma rota que nao existe responde 404 e nao entra no middleware de autenticacao. Um
+// 404 nao deve exigir token.
+func TestRotaInexistenteE404(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	resp := requisicaoFaz(t, h, http.MethodGet, "/nao-existe", "", nil)
+	if resp.Code != http.StatusNotFound {
+		t.Errorf("respondeu %d, esperado 404", resp.Code)
+	}
+}
+
+// O metodo errado em rota existente responde 405, e nao 404: a rota existe com outro
+// verbo.
+func TestMetodoErradoE405(t *testing.T) {
+	h := servidorDeTeste(t, validadorFixo{ator: app.Ator{Provedor: "provider-a"}})
+
+	resp := requisicaoFaz(t, h, http.MethodDelete, "/wallets", "", map[string]string{
+		"Authorization": "Bearer x",
+	})
+	if resp.Code != http.StatusMethodNotAllowed {
+		t.Errorf("respondeu %d, esperado 405", resp.Code)
+	}
+}
+
+// errDeNaoEncontrado evita que o teste dependa do pacote de persistencia para
+// exercitar a traducao de erro.
+type errDeNaoEncontrado struct{}
+
+func (errDeNaoEncontrado) Error() string { return "nao encontrado" }
+
+func (errDeNaoEncontrado) Is(alvo error) bool {
+	return alvo != nil && alvo.Error() == "pg: registro nao encontrado"
+}
