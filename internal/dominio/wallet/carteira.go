@@ -139,6 +139,13 @@ func (c Carteira) Jogador() Identificador { return c.jogador }
 // Saldo devolve o saldo atual.
 func (c Carteira) Saldo() money.Money { return c.saldo }
 
+// Moeda devolve a moeda da carteira.
+//
+// Existe como metodo e nao como inferencia do saldo porque o saldo de uma carteira
+// com saldo zero nao carrega moeda utilizavel, e a leitura precisa responder mesmo
+// assim.
+func (c Carteira) Moeda() money.Currency { return c.saldo.Currency() }
+
 // Versao devolve a versao do agregado.
 func (c Carteira) Versao() int64 { return c.versao }
 
