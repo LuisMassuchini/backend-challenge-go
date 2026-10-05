@@ -89,6 +89,9 @@ type TransacaoProcessada struct {
 	OcorridoEm time.Time
 	// Dados e o payload tipado, ja montado.
 	Dados map[string]any
+	// comTipo e o tipo real do evento. Os construtores tipados o usam; Novo o
+	// ignora e assume o tipo do proprio envelope.
+	comTipo Tipo
 }
 
 // Evento e um registro imutavel pronto para a outbox.
@@ -136,7 +139,7 @@ func Novo(entrada TransacaoProcessada) (Evento, error) {
 
 	return Evento{
 		eventID:     wallet.NovoIdentificador(),
-		tipo:        tipoDoConstrutor(entrada),
+		tipo:        tipoDe(entrada),
 		aggregateID: entrada.Agregado,
 		correlacao:  entrada.Correlacao,
 		causa:       entrada.Causa,
@@ -151,9 +154,14 @@ func Novo(entrada TransacaoProcessada) (Evento, error) {
 
 // tipoDoConstrutor devolve o tipo do evento.
 //
-// Entrada e tipo sao a mesma coisa por enquanto porque o construtor tipado de cada
-// evento ainda nao existe. A funcao existe para que a troca seja em um lugar so.
-func tipoDoConstrutor(TransacaoProcessada) Tipo { return TipoTransacaoProcessada }
+// Os construtores tipados informam o tipo por comTipo. Quem chama Novo direto
+// recebe o tipo do proprio construtor, que e o unico evento com envelope proprio.
+func tipoDe(entrada TransacaoProcessada) Tipo {
+	if entrada.comTipo.Valido() {
+		return entrada.comTipo
+	}
+	return TipoTransacaoProcessada
+}
 
 // Restaurar reconstroi um evento a partir do que foi persistido na outbox.
 //
