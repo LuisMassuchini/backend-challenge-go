@@ -116,6 +116,30 @@ conta na margem -- nem zero quando deveria, nem o valor da fila quando nao.
 
 ---
 
+## Composicao com Fx
+
+**Decisao:** `fx.Provide` e `fx.Invoke` em um grafo unico, em `internal/runtime/app`, e
+**nao** `fx.Module` por camada, que e o que o enunciado nomeia.
+
+**Por que nao:** `fx.Module` e agrupamento de providers, e o requisito real do enunciado
+e que a composicao use Fx com injecao por construtores -- o que o projeto faz. Com tres
+workers, um servidor e um pool em um arquivo de 200 linhas, o agrupamento em modulos e
+cosmetico, e o ganho real seria zero.
+
+**Por que mexer seria o custo errado:** a E17 tem dezesseis cenarios de E2E que sobem
+tres grafos de Fx completos por teste. Mexer no grafo funcionando para ganhar agrupamento
+cosmetico significa revalidar tudo isso por um ganho que nao aparece em nenhum criterio
+de avaliacao. A auditoria da E18 registrou a decisao e o argumento em
+`docs/auditoria.md`, secao 5.3, em vez de mudar o codigo.
+
+**O que o grafo faz e que um modulo nao faria melhor:** o worker de pendencias e
+registrado depois do consumidor de fila, e o relay depois dos dois -- e a ordem de
+`OnStop`, que e o inverso da de registro, que garante que o servidor HTTP para primeiro e
+que o relay sobe antes do produtor. Essa ordem esta no comentario de `app.go` e e
+testada por `tests/integration/ciclo`.
+
+---
+
 ## Dinheiro
 
 **Decisao:** `Money` e um value object imutavel com `int64` em unidade minima e
@@ -450,6 +474,26 @@ em replay do resultado persistido.
 `next_attempt_at` para backoff. `SKIP LOCKED` permite varios publishers sem que um
 espero o outro, e e o que permite recuperar trabalho abandonado depois de uma
 interrupcao.
+
+**A constraint que protegia o caminho errado.** A migration 00005 gravou `CHECK
+(last_retry_error IS NULL OR state IN ('PENDING', 'PENDING_REFERENCE', 'FAILED'))`, com
+o argumento de que "`PROCESSED` com nota de falha e um dado que se contradiz".
+
+O argumento estava errado, e a constraint-recusou um caminho legitimo: uma pendencia que
+esperou duas vezes e foi retomada na terceira chega a `PROCESSED` **com** a nota das duas
+primeiras. A nota conta o caminho, e nao descreve o estado atual. O efeito era um
+`ROLLBACK` que chegava antes da aposta ficar em `PENDING_REFERENCE` para sempre, mesmo
+com a referencia resolvida -- dinheiro correto, operacao que nunca termina.
+
+A migration 00008 relaxa a constraint em vez de remove-la: a nota continua exigindo
+rastro de espera (`retry_count > 0`), e so o estado terminal deixou de contar como
+contradicao. O `retry_count` e o que substitui a proibicao.
+
+**A licao e mais cara que o defeito:** a constraint foi escrita para defender uma
+propriedade que **nao era verdade**. A propriedade real e mais fraca e nao foi verificada
+contra o comportamento real do worker antes de virar `CHECK`. Constraint que impede um
+caminho legitimo e pior que constraint nenhuma: ela converte bug de logica em bug de
+dado, e o sintoma passa a apontar para o banco.
 
 **A inbox do replay e gravada em uma unidade propria, e nao na unidade da
 operacao.** Este nao e um detalhe de estilo: registrar a inbox dentro da unidade que
