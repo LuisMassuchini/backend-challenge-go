@@ -106,7 +106,7 @@ func TestLancamentoRecusaSaldoPosteriorIncompativel(t *testing.T) {
 }
 
 // Lancamento de valor zero nao pode existir. Ele nao muda o saldo, mas entraria
-// na soma do ledger, na contagem de lançamentos da reconciliacao e em qualquer
+// na soma do ledger, na contagem de lancamentos da reconciliacao e em qualquer
 // relatorio de movimentacao, como se fosse uma operacao financeira. LOSS e uma
 // operacao sem efeito: ela existe sem lancamento.
 func TestLancamentoRecusaValorZero(t *testing.T) {

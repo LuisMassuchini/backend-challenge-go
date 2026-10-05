@@ -90,5 +90,8 @@ func (i Identificador) String() string { return i.id.String() }
 // teste de string vazia nao pegaria.
 func (i Identificador) Valida() bool { return i.id != uuid.Nil }
 
+// Equal informa se os dois identificadores sao o mesmo.
+func (i Identificador) Equal(outro Identificador) bool { return i.id == outro.id }
+
 // UUID devolve o valor bruto, para conversao em SQL e em log.
 func (i Identificador) UUID() uuid.UUID { return i.id }

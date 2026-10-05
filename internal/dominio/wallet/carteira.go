@@ -221,6 +221,21 @@ func (c Carteira) Creditar(transacao Identificador, valor money.Money, agora tim
 	return c.comSaldo(novoSaldo, agora), lancamento, nil
 }
 
+// SemEfeito registra que houve uma operacao sobre a carteira sem movimentacao.
+//
+// E o que LOSS usa. O enunciado diz que LOSS nao altera o saldo e nao cria
+// lancamento, e a consequencia pouco obvia e que a versao tambem nao sobe: se
+// subisse, a linha da carteira seria reescrita por uma operacao que nao mudou
+// nada, e o escritor concorrente receberia conflito de update condicional sem que
+// houvesse dinheiro em jogo. O mesmo vale para AtualizadaEm.
+//
+// Devolve a carteira sem alteracao. O metodo existe para que a intencao
+// "processei isto e nao movi dinheiro" seja escrita no codigo, e nao para que
+// cada chamador precise adicionar um caso.
+func (c Carteira) SemEfeito(_ time.Time) Carteira {
+	return c
+}
+
 // validarOperacao confere o que toda movimentacao precisa ter.
 func (c Carteira) validarOperacao(transacao Identificador, valor money.Money, agora time.Time) error {
 	if !c.id.Valida() {
@@ -235,18 +250,25 @@ func (c Carteira) validarOperacao(transacao Identificador, valor money.Money, ag
 	if agora.IsZero() {
 		return fmt.Errorf("%w: instante da operacao ausente", ErrValorInvalido)
 	}
+	if agora.Before(c.criadaEm) {
+		return fmt.Errorf(
+			"%w: operacao em %v antes da criacao da carteira em %v",
+			ErrValorInvalido, agora, c.criadaEm,
+		)
+	}
 	return nil
 }
 
-// comSaldo devolve a carteira com o novo saldo.
+// comSaldo devolve a carteira com o novo saldo e a versao incrementada.
 //
-// A versao ainda nao e incrementada aqui: quem decide a versao e o commit que
-// acompanha a regra de versionamento, e um incremento cego em todo metodo de
-// movimentacao faria uma operacao sem efeito financeiro -- como LOSS -- subir a
-// versao sozinha.
+// A versao sobe aqui e nao em um metodo separado porque o incremento e parte da
+// mudanca de saldo: uma carteira com saldo novo e versao antiga faz o proximo
+// update condicional gravar por cima desta escrita, e uma carteira com versao nova
+// e saldo velho faz o escritor concorrente receber conflito sem motivo.
 func (c Carteira) comSaldo(saldo money.Money, agora time.Time) Carteira {
 	alterada := c
 	alterada.saldo = saldo
+	alterada.versao = c.versao + 1
 	alterada.atualizadaEm = agora
 	return alterada
 }
