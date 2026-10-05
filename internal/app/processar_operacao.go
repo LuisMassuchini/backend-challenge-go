@@ -234,6 +234,26 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		if err := s.confirmar(ctx, q, transacao, carteira, desfecho, req, correlacao, agora); err != nil {
 			return err
 		}
+
+		// A inbox e concluida aqui, e nao dentro de `confirmar`.
+		//
+		// `confirmar` cuida do desfecho da OPERACAO -- lancamento, saldo, estado,
+		// evento -- e o inbox pertence a ENTREGA da mensagem. Sao coisas diferentes: a
+		// mesma operacao chega por HTTP, e nesse caso nao ha mensagem nenhuma para
+		// concluir, enquanto a mesma operacao reentregue pelo consumer tem.
+		//
+		// Fica depois de `confirmar` e na mesma unidade por dois motivos. Primeiro, e
+		// o que faz `completed_at` e o desfecho da operacao compartilharem a
+		// transacao, como o enunciado exige: um inbox concluido sem o lancamento, ou
+		// um lancamento sem o inbox concluido, sao dois estados que nenhum dos dois
+		// lados sozinhos deveria conseguir enxergar. Segundo, os tres desfechos de
+		// `confirmar` -- PROCESSED, REJECTED e PENDING_REFERENCE -- sao duraveis, e
+		// nos tres a mensagem foi tratada. Fechar so no caminho feliz deixaria a
+		// recusa de saldo com a linha da inbox pendente para sempre.
+		if err := s.concluirInbox(ctx, q, req, agora); err != nil {
+			return err
+		}
+
 		resposta = respostaDoDesfecho(transacao, carteira, desfecho)
 		return nil
 	})
@@ -349,8 +369,21 @@ func (s Servicos) resolverReplay(
 	// ja estava na inbox e correto e barato.
 	if req.MensagemID != "" && req.Consumidor != "" {
 		if err := s.Unidade.Executar(ctx, func(nova pg.Querente) error {
-			return s.Inbox.Registrar(ctx, nova, req.Consumidor, req.MensagemID,
-				req.Fingerprint.String(), s.agora())
+			agora := s.agora()
+
+			if err := s.Inbox.Registrar(ctx, nova, req.Consumidor, req.MensagemID,
+				req.Fingerprint.String(), agora); err != nil {
+				return err
+			}
+
+			// Registrar e concluir na MESMA unidade. A mensagem reentregada foi
+			// tratada -- o replay e o tratamento, so que devolve o resultado ja
+			// gravado. Deixar `completed_at` nulo seria afirmar o contrario.
+			//
+			// E a mesma unidade de proposito: registrar aqui e concluir em outra
+			// deixaria uma janela em que a linha existe e parece pendente, que e
+			// exatamente o estado que o operador nao distingue de trabalho orfao.
+			return s.Inbox.Concluir(ctx, nova, req.Consumidor, req.MensagemID, agora)
 		}); err != nil {
 			return fmt.Errorf("inbox do replay: %w", err)
 		}
@@ -689,10 +722,12 @@ func responderReplay(existente wagering.Transacao, req RequisicaoOperacao) (Resp
 
 // registrarInbox marca a mensagem como recebida, quando a origem e SQS.
 //
-// Registrar e nao concluir: a conclusao da inbox e o passo seguinte do consumidor,
-// depois que o efeito ja foi confirmado. Registrar dentro da mesma transacao do
-// efeito e o que garante que uma reentrega encontra o registro e devolve o
+// Registrar e nao concluir: o registro vem ANTES do efeito, para que uma reentrega
+// encontre a linha mesmo quando o processo morreu no meio. Registrar dentro da mesma
+// transacao do efeito e o que garante que uma reentrega encontra o registro e devolve o
 // resultado persistido em vez de mover dinheiro de novo.
+//
+// A conclusao e `concluirInbox`, chamada depois que o desfecho foi gravado.
 func (s Servicos) registrarInbox(
 	ctx context.Context,
 	q pg.Querente,
@@ -703,4 +738,29 @@ func (s Servicos) registrarInbox(
 		return nil
 	}
 	return s.Inbox.Registrar(ctx, q, req.Consumidor, req.MensagemID, req.Fingerprint.String(), agora)
+}
+
+// concluirInbox marca a mensagem como tratada, quando a origem e SQS.
+//
+// O par com `registrarInbox` e o que da sentido a coluna `completed_at`: o registro
+// diz que a mensagem chegou, e a conclusao diz que ela produziu efeito. Sem a conclusao
+// as duas viram a mesma coisa, e a inbox passa a nao distinguir trabalho concluido de
+// trabalho orfao -- que e a unica pergunta que o operador faz dela.
+//
+// A guarda e a mesma de `registrarInbox` e pelo mesmo motivo: quem chega por HTTP nao
+// tem mensagem para concluir, e sem a guarda o `UPDATE` bateria em zero linhas e
+// falharia com "mensagem nao encontrada".
+func (s Servicos) concluirInbox(
+	ctx context.Context,
+	q pg.Querente,
+	req RequisicaoOperacao,
+	agora time.Time,
+) error {
+	if req.Consumidor == "" || req.MensagemID == "" {
+		return nil
+	}
+	if err := s.Inbox.Concluir(ctx, q, req.Consumidor, req.MensagemID, agora); err != nil {
+		return fmt.Errorf("conclusao na inbox: %w", err)
+	}
+	return nil
 }
