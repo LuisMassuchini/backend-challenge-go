@@ -74,7 +74,7 @@ func TestTiposQueExigemValorPositivoRecusamZero(t *testing.T) {
 }
 
 // LOSS e o caso invertido: exige zero. Um LOSS com valor maior que zero seria um
-// credito sem lancamento, ou um debito disfarçado de perda.
+// credito sem lancamento, ou um debito apresentado como perda.
 func TestLossRecusaValorDiferenteDeZero(t *testing.T) {
 	for _, valor := range []string{"0.01", "25.00", "-0.01"} {
 		t.Run(valor, func(t *testing.T) {

@@ -375,6 +375,15 @@ func validarRegistro(r Registro) error {
 	if err := validarPoliticaDeValor(r.Tipo, r.Valor); err != nil {
 		return err
 	}
+	// Referencia obrigatoria e conferida na entrada e nao depois. Uma reversao
+	// sem referencia nao tem contra o que reverter, e adiar essa recusa deixaria
+	// um registro duravel em PENDING que nenhuma regra consegue processar.
+	if r.Tipo.ExigeReferencia() && !r.Referencia.Externa.Valida() {
+		return fmt.Errorf("%w: %w", ErrRegistroInvalido, &FalhaDeRegra{
+			Codigo: CodigoFalhaReferenciaObrigatoria,
+			Motivo: fmt.Sprintf("%s exige referenceExternalTransactionId", r.Tipo),
+		})
+	}
 	if r.CriadaEm.IsZero() {
 		return fmt.Errorf("%w: instante de criacao ausente", ErrRegistroInvalido)
 	}
