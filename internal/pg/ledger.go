@@ -271,6 +271,61 @@ func (r RepositorioLedger) Listar(
 	return pagina, nil
 }
 
+// SomarPorCarteira devolve o saldo que o ledger implica para a carteira.
+//
+// A reconciliacao compara este valor com o saldo gravado na carteira. A soma e feita
+// no banco e nao percorrendo as linhas, porque uma carteira com muito movimento
+// nao cabe em memoria, e o objetivo e reconciliar sem custo proporcional ao
+// historico.
+//
+// O resultado e sempre derivado das linhas existentes, nunca do saldo da carteira:
+// e justamente a comparacao entre as duas fontes que detecta divergencia.
+func (r RepositorioLedger) SomarPorCarteira(
+	ctx context.Context,
+	q Querente,
+	carteira wallet.Identificador,
+) (money.Money, int64, error) {
+	if !carteira.Valida() {
+		return money.Money{}, 0, fmt.Errorf("pg: carteira invalida")
+	}
+
+	var (
+		creditos int64
+		debitos  int64
+		total    int
+		moeda    string
+	)
+
+	// Os dois lados sao somados no servidor e trazidos de volta ja somados: trazer as
+	// linhas para o processo seria copiar o historico inteiro da carteira.
+	linha := q.QueryRow(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN direction = 'CREDIT' THEN money_amount ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN direction = 'DEBIT'  THEN money_amount ELSE 0 END), 0),
+			COUNT(*),
+			COALESCE(MIN(currency), '')
+		FROM wallet_ledger_entries
+		WHERE wallet_id = $1`,
+		carteira.UUID(),
+	)
+
+	if err := linha.Scan(&creditos, &debitos, &total, &moeda); err != nil {
+		return money.Money{}, 0, fmt.Errorf("pg: soma do ledger: %w", err)
+	}
+
+	// Sem lancamento, a soma e zero e nao ha moeda de referencia. O chamador
+	// descobre a moeda pela carteira, que e a unica fonte valida nesse caso.
+	if total == 0 {
+		return money.Money{}, 0, nil
+	}
+
+	saldo, err := money.Parse(formatarCentavos(creditos-debitos), money.Currency(moeda))
+	if err != nil {
+		return money.Money{}, 0, fmt.Errorf("pg: soma do ledger viola a invariante: %w", err)
+	}
+	return saldo, int64(total), nil
+}
+
 // montarLancamento converte a linha em valor de dominio.
 func montarLancamento(
 	idBruto, carteiraBruta, transacaoBruta [16]byte,
