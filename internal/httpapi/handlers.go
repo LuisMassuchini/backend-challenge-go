@@ -189,18 +189,18 @@ func abrirCarteira(d Dependencias) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var corpo requisicaoAbertura
 		if err := lerCorpo(w, r, &corpo); err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
 		jogador, err := wallet.IdentificadorDe(corpo.PlayerId)
 		if err != nil {
-			escreverErro(w, fmt.Errorf("%w: playerId invalido", app.ErrRequisicaoInvalida))
+			escreverErro(r.Context(), w, fmt.Errorf("%w: playerId invalido", app.ErrRequisicaoInvalida))
 			return
 		}
 		saldo, err := dinheiroParaDominio(corpo.InitialBalance)
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
@@ -210,7 +210,7 @@ func abrirCarteira(d Dependencias) http.HandlerFunc {
 			SaldoInicial: saldo,
 		})
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
@@ -226,14 +226,14 @@ func lerCarteira(d Dependencias) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		identificador, err := wallet.IdentificadorDe(r.PathValue("walletId"))
 		if err != nil {
-			escreverErro(w, fmt.Errorf("%w: walletId invalido", app.ErrRequisicaoInvalida))
+			escreverErro(r.Context(), w, fmt.Errorf("%w: walletId invalido", app.ErrRequisicaoInvalida))
 			return
 		}
 
 		ator, _ := AtorDoContexto(r.Context())
 		carteira, err := app.LerCarteira(r.Context(), d.Servicos, ator, identificador)
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
@@ -246,7 +246,7 @@ func listarLedger(d Dependencias) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		identificador, err := wallet.IdentificadorDe(r.PathValue("walletId"))
 		if err != nil {
-			escreverErro(w, fmt.Errorf("%w: walletId invalido", app.ErrRequisicaoInvalida))
+			escreverErro(r.Context(), w, fmt.Errorf("%w: walletId invalido", app.ErrRequisicaoInvalida))
 			return
 		}
 
@@ -257,14 +257,14 @@ func listarLedger(d Dependencias) http.HandlerFunc {
 		if bruto := r.URL.Query().Get("limit"); bruto != "" {
 			limite, err = strconv.Atoi(bruto)
 			if err != nil || limite <= 0 {
-				escreverErro(w, fmt.Errorf("%w: limit precisa ser um inteiro positivo", app.ErrRequisicaoInvalida))
+				escreverErro(r.Context(), w, fmt.Errorf("%w: limit precisa ser um inteiro positivo", app.ErrRequisicaoInvalida))
 				return
 			}
 		}
 
 		cursor, err := pg.DecodificarCursor(r.URL.Query().Get("cursor"))
 		if err != nil {
-			escreverErro(w, fmt.Errorf("%w: %v", app.ErrRequisicaoInvalida, err))
+			escreverErro(r.Context(), w, fmt.Errorf("%w: %v", app.ErrRequisicaoInvalida, err))
 			return
 		}
 
@@ -272,7 +272,7 @@ func listarLedger(d Dependencias) http.HandlerFunc {
 		pagina, err := app.ListarLedger(r.Context(), d.Servicos, ator,
 			app.RequisicaoLedger{Carteira: identificador}, cursor, limite)
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
@@ -301,7 +301,7 @@ func reconciliar(d Dependencias) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		identificador, err := wallet.IdentificadorDe(r.PathValue("walletId"))
 		if err != nil {
-			escreverErro(w, fmt.Errorf("%w: walletId invalido", app.ErrRequisicaoInvalida))
+			escreverErro(r.Context(), w, fmt.Errorf("%w: walletId invalido", app.ErrRequisicaoInvalida))
 			return
 		}
 
@@ -310,7 +310,7 @@ func reconciliar(d Dependencias) http.HandlerFunc {
 			Carteira: identificador,
 		})
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
@@ -334,26 +334,26 @@ func enviarOperacao(d Dependencias) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		chave, err := chaveDeIdempotencia(r)
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
 		var corpo requisicaoOperacao
 		if err := lerCorpo(w, r, &corpo); err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
 		comando, err := comandoDaOperacao(chave, CorrelacaoDoContexto(r.Context()), corpo)
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
 		ator, _ := AtorDoContexto(r.Context())
 		resposta, err := app.ProcessarOperacao(r.Context(), d.Servicos, ator, comando)
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
@@ -366,14 +366,14 @@ func lerTransacao(d Dependencias) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		identificador, err := wallet.IdentificadorDe(r.PathValue("transactionId"))
 		if err != nil {
-			escreverErro(w, fmt.Errorf("%w: transactionId invalido", app.ErrRequisicaoInvalida))
+			escreverErro(r.Context(), w, fmt.Errorf("%w: transactionId invalido", app.ErrRequisicaoInvalida))
 			return
 		}
 
 		ator, _ := AtorDoContexto(r.Context())
 		transacao, err := app.LerTransacao(r.Context(), d.Servicos, ator, identificador)
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 
@@ -404,7 +404,7 @@ func lerTransacaoDoProvedor(d Dependencias) http.HandlerFunc {
 		transacao, err := app.LerTransacaoDoProvedor(r.Context(), d.Servicos, ator,
 			wagering.Provedor(provedor), wagering.Externo(externa))
 		if err != nil {
-			escreverErro(w, err)
+			escreverErro(r.Context(), w, err)
 			return
 		}
 

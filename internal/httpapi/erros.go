@@ -17,6 +17,7 @@ import (
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/money"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wagering"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wallet"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/pg"
 )
 
@@ -84,11 +85,32 @@ type respostaErro struct {
 //
 // A traducao de erro para status esta em uma funcao so, e nao espalhada pelos
 // handlers, porque o contrato do enunciado pede que entrada invalida, conflito,
-// recusa de negocio, pendencia e indisponibilidade sejam distinguiveis. Uma tabela
-// em um lugar e o que garante que dois handlers nao classifiquem o mesmo erro de
-// formas diferentes.
-func escreverErro(w http.ResponseWriter, err error) {
+// recusa de negocio, pendencia e indisponibilidade sejam distinguiveis. Uma tabela em
+// um lugar e o que garante que dois handlers nao classifiquem o mesmo erro de formas
+// diferentes.
+//
+// O log da falha e aqui, e nao em cada handler, pelo mesmo motivo: um unico ponto de
+// log garante que toda resposta de erro tem linha no log, com a mesma correlacao da
+// requisicao. Um log por handler e um log que esquece o handler novo.
+func escreverErro(ctx context.Context, w http.ResponseWriter, err error) {
 	status, corpo := classificarErro(err)
+
+	// A linha so sai a partir de 500. Um 422 por saldo insuficiente e a resposta
+	// esperada de um jogo em andamento, e logar como erro transformaria o volume
+	// normal de operacao em alarms -- e o alarme que ninguem acredita deixa de
+	// avisar quando importa.
+	if status >= http.StatusInternalServerError {
+		obs.Log(obs.De(ctx)).Error("requisicao recusada por falha",
+			"status", status,
+			obs.ErroCom(err),
+		)
+	} else {
+		obs.Log(obs.De(ctx)).Info("requisicao nao atendida",
+			"status", status,
+			"erro", corpo.Erro,
+		)
+	}
+
 	responderJSON(w, status, corpo)
 }
 

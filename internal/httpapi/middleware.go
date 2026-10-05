@@ -2,7 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"log/slog"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -10,6 +10,7 @@ import (
 
 	"github.com/LuisMassuchini/backend-challenge-go/internal/app"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/auth"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 )
 
 // chaveAtor e o contexto sob o qual o ator autenticado viaja ate o handler.
@@ -92,9 +93,14 @@ func autenticar(d Dependencias, proximo http.HandlerFunc) http.HandlerFunc {
 
 // comCorrelacao garante que toda requisicao tenha um identificador de correlacao.
 //
-// O identificador entra no contexto e na resposta. Na resposta porque e o que
-// permite ao cliente citar a correlacao ao abrir um chamado, e o caminho mais curto
-// entre "algo deu errado" e o log exato.
+// O identificador entra no contexto e na resposta. Na resposta porque e o que permite
+// ao cliente citar a correlacao ao abrir um chamado, e o caminho mais curto entre
+// "algo deu errado" e o log exato.
+//
+// A correlacao e o que o `obs` le para anexar os identificadores em todo log da
+// requisicao. O campo separado `chaveCorrelacao` continua existindo porque a API
+// exportada de correlacao e usada pelos handlers; os dois guardam o mesmo valor e nao
+// podem divergir, porque sao preenchidos na mesma linha.
 func comCorrelacao(proximo http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		correlacao := r.Header.Get(cabecalhoCorrelacao)
@@ -108,7 +114,12 @@ func comCorrelacao(proximo http.Handler) http.Handler {
 		}
 
 		w.Header().Set(cabecalhoCorrelacao, correlacao)
+
 		ctx := context.WithValue(r.Context(), chaveCorrelacao{}, correlacao)
+		// O contexto do `obs` nasce aqui e e ele que viaja para os workers: qualquer
+		// log da requisicao le a correlacao sem que o chamador a passe adiante. O
+		// `ComCorrelacao` e o que impede a linha de ficar sem o campo.
+		ctx = obs.AnexarCorrelacao(ctx, correlacao)
 		proximo.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -126,11 +137,10 @@ func recuperar(proximo http.Handler) http.Handler {
 				// cabecalho pode ter saido. Escrever 500 nesse estado adiciona
 				// bytes a uma resposta started, e o cliente ve JSON truncado em vez
 				// de um erro limpo.
-				slog.Error("panic no handler",
+				obs.Log(obs.De(r.Context())).Error("panic no handler",
 					"metodo", r.Method,
 					"caminho", r.URL.Path,
-					"correlacao", CorrelacaoDoContexto(r.Context()),
-					"motivo", motivo,
+					obs.ErroCom(fmt.Errorf("%v", motivo)),
 				)
 				responderJSON(w, http.StatusInternalServerError, respostaErro{
 					Erro:    "erro_interno",
@@ -148,18 +158,21 @@ func recuperar(proximo http.Handler) http.Handler {
 //
 // O log por requisicao e o que permite afirmar, depois, que a garantia de nao
 // duplicar movimentacao valeu em producao e nao so no teste.
+//
+// A correlacao vem do contexto e nao do cabecalho lido de novo: o `comCorrelacao` ja
+// a colocou no contexto, e reler o cabecalho aqui arriscaria a linha citar uma
+// correlacao diferente da que foi para o handler.
 func cronometrar(proximo http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		inicio := time.Now()
 		registrador := &registradorDeStatus{ResponseWriter: w}
 		proximo.ServeHTTP(registrador, r)
 
-		slog.Info("requisicao atendida",
+		obs.Log(obs.De(r.Context())).Info("requisicao atendida",
 			"metodo", r.Method,
 			"caminho", r.URL.Path,
 			"status", statusGravado(registrador),
-			"duracao_ms", time.Since(inicio).Milliseconds(),
-			"correlacao", CorrelacaoDoContexto(r.Context()),
+			obs.Duracao("duracao_ms", time.Since(inicio).Milliseconds()),
 		)
 	})
 }
@@ -207,11 +220,20 @@ func statusGravado(w http.ResponseWriter) int {
 
 // comMiddlewares monta a cadeia completa.
 //
-// A ordem e a do mais externo para o mais interno e cada posicao tem uma razao:
-// recuperar e o mais externo para pegar panic de qualquer etapa; cronometrar vem
-// antes da correlacao para que uma requisicao que quebra na correlacao ainda seja
-// cronometrada; e a autenticacao e a mais interna de todas para que so o trabalho
-// autenticado entre no log de negocio.
+// A ordem e a do mais externo para o mais interno, e cada posicao tem uma razao.
+//
+// `recuperar` e o mais externo para pegar panic de qualquer etapa, inclusive da
+// montagem da correlacao.
+//
+// `comCorrelacao` vem antes de `cronometrar`, e a ordem importa para o log de
+// requisicao carregar a correlacao. A composicao e `externa(interna(proximo))`: o
+// `cronometrar` recebe o `r` que o `comCorrelacao` ja modificou, e por isso o
+// `r.Context()` dele tem a correlacao. Com a ordem antiga, `cronometrar` era
+// executado por fora e logava com o contexto original -- sem correlacao em
+// nenhuma linha, o que o teste de rastreabilidade pegou na primeira execucao.
+//
+// A autenticacao e a mais interna de todas, para que so o trabalho autenticado entre
+// no log de negocio.
 func comMiddlewares(proximo http.Handler) http.Handler {
-	return recuperar(cronometrar(comCorrelacao(proximo)))
+	return recuperar(comCorrelacao(cronometrar(proximo)))
 }

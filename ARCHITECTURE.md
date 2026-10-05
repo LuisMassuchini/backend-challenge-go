@@ -12,6 +12,60 @@ encontra.
 
 ---
 
+## Observabilidade
+
+**Decisao de produto, nao de arquitetura: o log correlacionado vem antes das metricas.**
+O plano original da E16 punha metricas depois do log, e a ordem foi invertida a pedido
+do usuario, para que o projeto fosse entregue mais rapido. E uma escolha legitima e
+com razao: o log correlacionado e o que ajuda a diagnosticar problema de verdade --
+o relay que republica em laco, o consumidor que reentrega -- e esses problemas
+nasceram na E13 e na E15, que empacotaram codigo que so existe para ser objeto de
+depuracao. Ter o log pronto ainda na E16 e o que permite depurar a E17 sem etapa extra.
+
+O preco e conhecido e fica escrito: o log e codificado contra o que existe hoje. Um
+ponto de log novo pode nao pegar a correlacao enquanto os pontos antigos continuarem
+sem ela. A alternativa -- adiar para depois da E17 -- custaria etapas inteiras de
+depuracao sem correlacao por cima de codigo que existe para ser depurado.
+
+**O log carrega os cinco identificadores do enunciado mais o `eventId`.**
+`correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`, e o
+`eventId` porque o relay nao conhece a operacao: ele conhece o evento, e o `eventId` e
+o identificador que sobrevive a republicacao e pelo qual o operador acompanha um
+evento que falha ao sair.
+
+**A correlacao e anexada uma vez, na borda, e viaja no `context.Context`.** Todo log
+posterior le o valor com `obs.De(ctx)` sem que a camada passe o identificador adiante.
+Um log que recebe a correlacao como parametro obrigatorio em cada funcao e um log que
+perde a correlacao no primeiro `go` que esquece o parametro.
+
+**`comCorrelacao` roda antes de `cronometrar`, e a ordem nao e um detalhe.** A
+composicao e `externa(interna(proximo))`, entao `cronometrar` so recebe o `r` que
+`comCorrelacao` ja modificou. Com a ordem antiga, o log de requisicao saia sem
+correlacao em todas as linhas -- e isso nao apareceu em nenhum teste anterior, porque
+ninguem tinha procurado pela correlacao no log.
+
+**Campo ausente e diferente de campo vazio.** Um `transactionId: ""` em toda linha de
+quem nao tem transacao polui a busca e faz o operador desconfiar do campo.
+
+**Dinheiro nao entra no log.** Nenhum valor monetario, formatted ou em unidades
+minimas, aparece nas linhas do caminho da requisicao. O que substitui o valor e o campo
+`movimento`, que diz "houve debito" sem dizer quanto. A unica excecao e a divergencia
+da reconciliacao, que grava os dois saldos em centavos -- e a justificativa e que a
+reconciliacao e o alerta que existe justamente para divergir, e um alerta que nao diz
+quanto divergiu obriga quem o recebe a abrir o banco.
+
+**Identificador externo e truncado em 256 caracteres.** O volume de log tem de crescer
+com o que o servico fez e nao com o que o cliente mandou.
+
+**Erro vai sempre na chave `erro`.** Um agregador que indexa por chave encontra toda
+falha no mesmo campo, e nao em `err`, `error` e `motivo`, que e como o log cresce
+quando cada chamador inventa o nome.
+
+**A divergencia de reconciliacao sai como erro.** As duas outras respostas do
+reconciliador -- convergente e carteira sem lancamento -- sao Info ou silencio.
+
+---
+
 ## Dinheiro
 
 **Decisao:** `Money` e um value object imutavel com `int64` em unidade minima e

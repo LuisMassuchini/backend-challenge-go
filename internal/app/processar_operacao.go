@@ -9,6 +9,7 @@ import (
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/money"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wagering"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wallet"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/pg"
 )
 
@@ -93,6 +94,20 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 	agora := s.agora()
 	correlacao := s.correlacao(req.Correlacao)
 
+	// O Contexto de log nasce aqui, e nao no transporte, porque e o primeiro ponto onde
+	// transacao e carteira tem identificador proprio. A partir daqui a correlacao
+	// atravessa o log do caso de uso, o da gravacao e o do evento sem que ninguem
+	// precise passar o valor adiante.
+	//
+	// O log da operacao carrega a chave de idempotencia porque ela e o identificador
+	// que o provedor consegue citar. O `transactionId` so existe depois do commit, e
+	// um log de falha que acontece antes dele precisa de um identificador que o
+	// provedor ja conhecia.
+	logOperacao := obs.De(ctx).
+		ComCorrelacao(correlacao).
+		ComProvedor(string(req.Provedor)).
+		ComCarteira(req.Carteira.String())
+
 	var resposta RespostaOperacao
 
 	registro := wagering.Registro{
@@ -166,8 +181,30 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		return nil
 	})
 	if err != nil {
+		// O log aqui e do erro de infraestrutura, e nao da recusa: recusa vira desfecho e
+		// sai pelo bloco de confirmacao, com o evento de rejeicao. O que chega nesta
+		// linha e banco fora, lock esgotado ou erro do driver, que sao falhas de
+		// infraestrutura e devem aparecer como erro.
+		//
+		// Nenhum valor monetario entra. O enunciado proibe payload financeiro completo
+		// no log, e quem precisa do valor consulta o ledger pelo `transactionId`.
+		obs.Log(logOperacao).Error("operacao nao confirmada",
+			"tipo", string(req.Tipo),
+			"chave", string(req.Chave),
+			obs.ErroCom(err),
+		)
 		return RespostaOperacao{}, err
 	}
+
+	// O desfecho confirmado e a unica linha que o operador precisa para responder "o
+	// que aconteceu com esta operacao". O saldo nao entra: o valor esta no evento e
+	// na resposta, e o log carrega os identificadores para chegar la.
+	obs.Log(logOperacao.ComTransacao(resposta.TransacaoID.String())).
+		Info("operacao confirmada",
+			"tipo", string(req.Tipo),
+			"estado", string(resposta.Estado),
+			"replay", resposta.Replay,
+		)
 
 	return resposta, nil
 }

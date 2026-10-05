@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/LuisMassuchini/backend-challenge-go/internal/app"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 )
 
 // Worker percorre as pendencias de referencia.
@@ -94,7 +95,7 @@ func (w *Worker) Rodar(ctx context.Context) error {
 			}
 			// Falha de infraestrutura no laco. Voltar a tentar imediatamente
 			// transformaria o banco fora em um laco apertado de log.
-			slog.Error("falha no ciclo de pendencias", "erro", err.Error())
+			obs.Log(obs.De(ctx)).Error("falha no ciclo de pendencias", obs.ErroCom(err))
 			if !dormir(ctx, w.ocioso) {
 				return nil
 			}
