@@ -352,18 +352,25 @@ func TestUnicidadeDoLancamentoPorTransacao(t *testing.T) {
 	conexao := dbtest.NovaConexao(t)
 	criaCarteira(t, conexao, carteiraA, jogadorA, "BRL", 10000)
 
-	lancamento := `
+	// A movimentacao completa e usada porque o trigger de coerencia exige que a
+	// carteira acompanhe o lancamento. Um lancamento isolado seria recusado por
+	// outra razao, e o teste estaria medindo a constraint errada.
+	if err := movimenta(t, conexao, carteiraA, transacaoA, "DEBIT", 2500, 10000, 7500); err != nil {
+		t.Fatalf("primeira movimentacao: %v", err)
+	}
+
+	duplicado := `
 		INSERT INTO wallet_ledger_entries (
 			id, wallet_id, transaction_id, direction, money_amount, currency,
 			balance_before, balance_after, created_at
 		)
-		VALUES ($1, $2, $3, 'DEBIT', 2500, 'BRL', 10000, 7500, $4)`
-
-	if _, err := conexao.ExecContext(context.Background(), lancamento, "0192f299-1111-7e38-af88-e43f851a819d", carteiraA, transacaoA, agora()); err != nil {
-		t.Fatalf("primeiro lancamento: %v", err)
-	}
-	if _, err := conexao.ExecContext(context.Background(), lancamento, "0192f299-2222-7e38-af88-e43f851a819d", carteiraA, transacaoA, agora()); err == nil {
+		VALUES ($1, $2, $3, 'DEBIT', 2500, 'BRL', 7500, 5000, $4)
+	`
+	if _, err := conexao.ExecContext(context.Background(), duplicado,
+		uuid.NewString(), carteiraA, transacaoA, agora()); err == nil {
 		t.Fatal("banco aceitou segundo lancamento da mesma transacao na mesma carteira")
+	} else if !dbtest.ErroDeConstraint(err) {
+		t.Fatalf("devolveu %v, esperado violacao de constraint", err)
 	}
 }
 
@@ -374,29 +381,46 @@ func TestDirecaoEValorDoLancamento(t *testing.T) {
 	criaCarteira(t, conexao, carteiraA, jogadorA, "BRL", 10000)
 
 	casos := []struct {
-		nome   string
-		id     string
-		dir    string
-		valor  int64
-		recusa bool
+		nome     string
+		carteira string
+		direcao  string
+		valor    int64
+		saldo    int64
+		recusa   bool
 	}{
-		{"credito valido", "0192f299-1111-7e38-af88-e43f851a8191", "CREDIT", 2500, false},
-		{"debito valido", "0192f299-1111-7e38-af88-e43f851a8192", "DEBIT", 2500, false},
-		{"direcao desconhecida", "0192f299-1111-7e38-af88-e43f851a8193", "TRANSFER", 2500, true},
-		{"valor zero", "0192f299-1111-7e38-af88-e43f851a8194", "CREDIT", 0, true},
-		{"valor negativo", "0192f299-1111-7e38-af88-e43f851a8195", "CREDIT", -2500, true},
+		{"credito valido", carteiraB, "CREDIT", 2500, 0, false},
+		{"debito valido", carteiraA, "DEBIT", 2500, 10000, false},
+		{"direcao desconhecida", carteiraB, "TRANSFER", 2500, 0, true},
+		{"valor zero", carteiraB, "CREDIT", 0, 0, true},
+		{"valor negativo", carteiraB, "CREDIT", -2500, 0, true},
 	}
+
+	// A movimentacao completa e usada em todos os casos: o trigger de coerencia
+	// exige que a carteira acompanhe o lancamento, e um INSERT isolado seria
+	// recusado por outra razao, medindo a constraint errada.
+	//
+	// Duas carteiras, e nao uma, porque o unico lancamento de cada caso tem de ser
+	// o ultimo da sua carteira: a unicidade de (wallet_id, transaction_id) e o
+	// proprio objeto de um dos casos.
+	criaCarteira(t, conexao, carteiraB, jogadorB, "BRL", 10000)
 
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {
-			_, err := conexao.ExecContext(context.Background(), `
-				INSERT INTO wallet_ledger_entries (
-					id, wallet_id, transaction_id, direction, money_amount, currency,
-					balance_before, balance_after, created_at
-				)
-				VALUES ($1, $2, $3, $4, $5, 'BRL', 10000, 7500, $6)
-			`, c.id, carteiraA, uuid.NewString(), c.dir, c.valor, agora())
+			if _, err := conexao.ExecContext(context.Background(),
+				`UPDATE wallets SET balance = $2 WHERE id = $1`, c.carteira, c.saldo); err != nil {
+				t.Fatalf("preparo do saldo: %v", err)
+			}
 
+			antes := c.saldo
+			depois := antes + c.valor
+			if c.direcao == "DEBIT" {
+				depois = antes - c.valor
+			}
+			if c.direcao != "CREDIT" && c.direcao != "DEBIT" {
+				depois = antes
+			}
+
+			err := movimenta(t, conexao, c.carteira, uuid.NewString(), c.direcao, c.valor, antes, depois)
 			if c.recusa && err == nil {
 				t.Fatalf("banco aceitou %s", c.nome)
 			}
@@ -478,13 +502,9 @@ func TestCasosValidosSaoAceitos(t *testing.T) {
 	criaTransacao(t, conexao, transacaoA, "provider-a", carteiraA, jogadorA, "provider-a:1", "1", "BET", 2500)
 	criaTransacao(t, conexao, transacaoB, "provider-b", carteiraB, jogadorB, "provider-b:1", "1", "WIN", 2500)
 
-	if _, err := conexao.ExecContext(context.Background(), `
-		INSERT INTO wallet_ledger_entries (
-			id, wallet_id, transaction_id, direction, money_amount, currency,
-			balance_before, balance_after, created_at
-		)
-		VALUES ('0192f299-1111-7e38-af88-e43f851a819d', $1, $2, 'DEBIT', 2500, 'BRL', 10000, 7500, $3)
-	`, carteiraA, transacaoA, agora()); err != nil {
+	// A movimentacao completa, e nao um INSERT isolado: o trigger de coerencia
+	// exige que a carteira acompanhe o lancamento no mesmo commit.
+	if err := movimenta(t, conexao, carteiraA, transacaoA, "DEBIT", 2500, 10000, 7500); err != nil {
 		t.Fatalf("lancamento valido recusado: %v", err)
 	}
 
