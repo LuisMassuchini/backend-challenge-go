@@ -9,6 +9,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -77,6 +78,11 @@ type Config struct {
 	Runtime Runtime
 	HTTP    HTTP
 	OIDC    OIDC
+
+	// Postgres e SQS sao as dependencias externas. Postgres e obrigatorio; SQS e
+	// opcional, porque o comando de migration precisa do primeiro e nao do segundo.
+	Postgres Postgres
+	SQS      SQS
 }
 
 // ValidationError nomeia a variavel de ambiente que precisa ser corrigida.
@@ -156,6 +162,18 @@ func FromEnv(getenv func(string) (string, bool)) (Config, error) {
 		return Config{}, err
 	}
 	cfg.OIDC = oidc
+
+	postgres, err := lerPostgres(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Postgres = postgres
+
+	sqs, err := lerSQS(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.SQS = sqs
 
 	return cfg, nil
 }
@@ -351,6 +369,24 @@ func lerDuracao(getenv func(string) (string, bool), chave string, padrao time.Du
 	return d, nil
 }
 
+// Slog converte o nivel da configuracao para o nivel do log estruturado.
+//
+// A traducao mora aqui porque e o unico lugar que conhece os dois conjuntos de nomes:
+// o do arquivo de configuracao, que a operacao edita, e o da biblioteca de log, que a
+// biblioteca conhece. Sem ela, cada consumidor reconversao, e a reconversao e onde
+// os nomes divergem.
+func (l LogLevel) Slog() slog.Level {
+	switch l {
+	case LogLevelDebug:
+		return slog.LevelDebug
+	case LogLevelWarn:
+		return slog.LevelWarn
+	case LogLevelError:
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
 func lerLogLevel(getenv func(string) (string, bool)) (LogLevel, error) {
 	bruto, definido := getenv(ChaveLogLevel)
 	if !definido {
