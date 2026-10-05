@@ -21,18 +21,18 @@ import (
 // nao em variavel de ambiente porque o endpoint ja e local e o par existe no
 // compose; pedir duas variaveis a mais para um valor que nao autentica nada aqui
 // seria configuracao sem efeito.
+//
+// O long polling nao aparece aqui de proposito: ele e atributo da fila, provisionado
+// em `deploy/localstack/init/00-filas.sh` com vinte segundos. Havia uma constante
+// `esperaMaximaDeRecebimento` neste arquivo que prometia controlar isso e nao controlava
+// -- e a justificativa dela, "metade do timeout de visibilidade", estava errada: a
+// visibilidade conta a partir do recebimento, nao do inicio do poll. Ver o doc de
+// `sqs.Opcoes`.
 const (
 	regiaoPadrao          = "us-east-1"
 	chaveDeAcessoPadrao   = "test"
 	segredoDeAcessoPadrao = "test"
 )
-
-// esperaMaximaDeRecebimento e o teto do long polling.
-//
-// O teto e metade do timeout de visibilidade. Se o long polling esperasse tanto
-// quanto a visibilidade, uma mensagem entregue no fim da espera ja estaria perto de
-// ser reentregue a outra instancia enquanto o consumidor ainda a processa.
-const esperaMaximaDeRecebimento = 10 * time.Second
 
 // FilaDeOperacoes embrulha o cliente SQS para o grafo.
 //
@@ -77,7 +77,6 @@ func construirFila(cfg config.Config) (FilaDeOperacoes, error) {
 		SegredoDeAcesso: segredoDeAcessoPadrao,
 		FilaOperacoes:   cfg.SQS.FilaOperacoes,
 		FilaDeadLetter:  cfg.SQS.FilaDeadLetter,
-		EsperaMaxima:    esperaMaximaDeRecebimento,
 	})
 	if err != nil {
 		return FilaDeOperacoes{}, fmt.Errorf("fila: %w", err)
