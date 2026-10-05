@@ -1,0 +1,115 @@
+# Ambiente local do wager-service.
+#
+# Os tres servicos aqui sao infraestrutura de verdade, nao substituto de teste.
+# O enunciado proibe substituir PostgreSQL, SQS e IdP por mock, e a razao e
+# tecnica antes de ser burocratica: o que precisa ser provado neste desafio --
+# lock por carteira, constraint, inbox, FIFO, redrive e validacao de token --
+# existe no comportamento do PostgreSQL e do SQS, nao no de uma biblioteca Go.
+#
+# As versoes sao fixadas por patch. Tag flutuante e o jeito mais comum de um
+# ambiente funcionar na maquina de uma pessoa e nao na da outra.
+#
+# O `docker compose up -d` sozinho nao significa que o ambiente esta pronto.
+# Por isso todo servico tem healthcheck: quem espera por container em execucao
+# aceita conexao recusada como se fosse sucesso, e o primeiro erro de uma
+# migration passa a parecer erro do codigo.
+name: wager-service
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: ${WAGER_POSTGRES_USER:-wager}
+      POSTGRES_PASSWORD: ${WAGER_POSTGRES_PASSWORD:-wager}
+      POSTGRES_DB: ${WAGER_POSTGRES_DB:-wager}
+      # O timezone do cluster e fixado porque `timestamptz` depende do fuso do
+      # servidor quando o INSERT nao traz fuso explicito. O padrao do container
+      # faria o mesmo INSERT gravar valores diferentes em maquinas diferentes.
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "${WAGER_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-dados:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready sozinho responde "aceitando conexoes" para um cluster que
+      # ainda esta recovering, e nesse instante a primeira migration falha. A
+      # consulta exige cluster pronto e nao apenas vivo.
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U ${WAGER_POSTGRES_USER:-wager} -d ${WAGER_POSTGRES_DB:-wager} -q
+          && psql -U ${WAGER_POSTGRES_USER:-wager} -d ${WAGER_POSTGRES_DB:-wager} -tAc 'SELECT 1' > /dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  localstack:
+    image: localstack/localstack:4.4.0
+    environment:
+      # Apenas SQS. Habilitar servico que nao e usado atrasa o start e ocupa
+      # memoria sem agregar nada ao desafio.
+      SERVICES: sqs
+      # Regiao unica e fixada: sem isso o SDK pode cair no endereco publico da
+      # AWS quando a regiao nao bate, e o teste passa a depender da internet.
+      AWS_DEFAULT_REGION: ${WAGER_AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${WAGER_AWS_ACCESS_KEY_ID:-test}
+      AWS_SECRET_ACCESS_KEY: ${WAGER_AWS_SECRET_ACCESS_KEY:-test}
+      DEBUG: ${WAGER_LOCALSTACK_DEBUG:-0}
+    ports:
+      - "${WAGER_SQS_PORT:-4566}:4566"
+    volumes:
+      - localstack-dados:/var/lib/localstack
+      # Os hooks de init rodam uma vez, no start. As filas FIFO e a politica de
+      # redrive nascem daqui, provisioned por codigo e nao por clique.
+      - ./deploy/localstack/init:/etc/localstack/init/hooks:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4566/_localstack/health | grep -q '\"sqs\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3.3
+    command:
+      - start-dev
+      - --import-realm
+    environment:
+      # O bootstrap admin pertence ao ambiente local de teste. A senha aqui e
+      # publica por desenho: quem le o repositorio precisa conseguir entrar no
+      # IdP para rodar os testes autenticados. O que nao pode e um segredo real
+      # neste arquivo.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${WAGER_KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${WAGER_KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "${WAGER_KEYCLOAK_PORT:-8081}:8080"
+    volumes:
+      # O realm entra por import no start: o ambiente sobe com realm, clientes,
+      # escopos e identidades de teste prontos, sem passo manual. O caminho e o
+      # que o Keycloak le no start-dev.
+      - ./deploy/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # A imagem do Keycloak nao tem curl nem wget, e o descritor de porta do
+      # shell e o unico jeito de consultar o endpoint sem instalar nada na
+      # imagem. O status UP so aparece depois que o import do realm termina, e
+      # por isso o healthcheck tambem serve de espera de readiness.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/localhost/9000
+          && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          && grep -q '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres-dados:
+  localstack-dados:

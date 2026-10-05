@@ -11,6 +11,12 @@
 # As receitas sao POSIX e dependem de um shell POSIX. No Windows, o GNU make
 # procura `sh.exe`, que o Git for Windows instala em `usr/bin` mas nao coloca no
 # PATH por padrao. Sem isso, nenhuma receita roda.
+#
+# As receitas com `docker run` prefixam MSYS_NO_PATHCONV=1. O shell do Git for
+# Windows e um MSYS: sem essa variavel, ele reescreve argumento que parece
+# caminho Unix e converte `-w /src` no diretorio equivalente dentro da propria
+# instalacao do Git. O sintoma e um erro do daemon sobre um diretorio invalido,
+# que parece problema de Docker e nao e.
 
 GO       ?= go
 GOFMT    ?= gofmt
@@ -30,7 +36,7 @@ help: ## Lista os alvos disponiveis
 
 verify: check-ascii fmt-check vet build test ## Gate minimo: ASCII, gofmt, vet, build e testes
 verify-docker: ## Gate minimo dentro da imagem oficial do Go
-	docker run --rm -v "$(CURDIR):/src" -w /src $(GO_IMAGE) make verify
+	MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR):/src" -w /src $(GO_IMAGE) make verify
 
 ##@ Codigo
 
@@ -80,7 +86,14 @@ cover: ## Gera o relatorio de cobertura em coverage.out
 	$(GO) tool cover -func=coverage.out
 
 test-docker: ## Executa a suite dentro da imagem oficial do Go
-	docker run --rm -v "$(CURDIR):/src" -w /src $(GO_IMAGE) make test
+	MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR):/src" -w /src $(GO_IMAGE) make test
+
+# O detector de corrida exige cgo e um compilador C. Uma maquina de
+# desenvolvimento Windows sem `gcc` e sem `clang` nao tem um, e `go test -race`
+# falha la com `-race requires cgo`. A imagem oficial tem gcc, entao este alvo e
+# o caminho do portao de `-race` nessa maquina -- e nao um atalho opcional.
+test-race-docker: ## Executa a suite com detector de corrida na imagem oficial do Go
+	MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR):/src" -w /src $(GO_IMAGE) go test -race ./...
 
 ##@ Execucao
 
@@ -88,7 +101,7 @@ run: ## Sobe a aplicacao
 	$(GO) run ./cmd/wager-service
 
 shell-docker: ## Abre um shell na imagem oficial do Go, com o repo montado
-	docker run --rm -it -v "$(CURDIR):/src" -w /src $(GO_IMAGE) sh
+	MSYS_NO_PATHCONV=1 docker run --rm -it -v "$(CURDIR):/src" -w /src $(GO_IMAGE) sh
 
 ##@ Limpeza
 
