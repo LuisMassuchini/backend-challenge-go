@@ -106,8 +106,14 @@ func New(cfg config.Config, eventos *Eventos) *app {
 			construirValidador,
 			construirProntidao,
 			construirFila,
+			construirWorkerDePendencias,
 			construirServidorHTTP,
 		),
+		// O worker de pendencias e registrado depois do consumidor de fila para que, no
+		// encerramento, o consumidor pare antes: enquanto o consumidor ainda aplica
+		// operacoes, o worker precisa estar vivo senao uma pendencia criada no ultimo
+		// segundo ficaria sem ninguem para retomar.
+		fx.Invoke(registrarWorkerDePendencias),
 		fx.Invoke(registrarCicloDeVida),
 		// O grafo do Fx e preguicoso: um provider so e construido quando alguem
 		// precisa do valor. Sem este Invoke, o servidor, o pool e o validador seriam

@@ -124,6 +124,15 @@ const (
 	// CodigoFalhaPersistencia cobre falha permanente de infraestrutura
 	// registrada para auditoria.
 	CodigoFalhaPersistencia CodigoFalha = "FALHA_DE_PERSISTENCIA"
+
+	// CodigoFalhaReferenciaNuncaChegou marca a reversao cuja referencia nao chegou e
+	// nao chegara.
+	//
+	// E codigo do dominio e nao da aplicacao porque expirar e uma decisao de regra:
+	// uma espera sem fim e um provedor sem resposta, e um provedor com uma resposta
+	// definitiva pode decidir o que fazer. O prazo e politica; a necessidade de
+	// responder e regra.
+	CodigoFalhaReferenciaNuncaChegou CodigoFalha = "REFERENCIA_NUNCA_CHEGOU"
 )
 
 // Erros do dominio.

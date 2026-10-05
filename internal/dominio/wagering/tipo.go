@@ -70,7 +70,8 @@ func (c CodigoFalha) Valido() bool {
 		CodigoFalhaReferenciaNaoProcessada,
 		CodigoFalhaReversaoJaAplicada,
 		CodigoFalhaTipoNaoSuportado,
-		CodigoFalhaPersistencia:
+		CodigoFalhaPersistencia,
+		CodigoFalhaReferenciaNuncaChegou:
 		return true
 	}
 	return false

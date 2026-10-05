@@ -127,15 +127,18 @@ func registrarEventoProcessada(
 	s Servicos,
 	q pg.Querente,
 	transacao wagering.Transacao,
-	req RequisicaoOperacao,
 	resultado money.Money,
 	correlacao string,
 	agora time.Time,
 ) error {
+	// Provedor e identificador externo vem da TRANSACAO, e nao do comando. A
+	// retomada de uma pendencia nao tem comando: a linha ja estava no banco, e o
+	// evento precisa da mesma identidade que a transacao gravou. Ler do comando
+	// deixaria o evento sem provedor e a operacao inteira falhando por um envelope.
 	evento, err := eventos.NovaTransacaoProcessada(eventos.DadosTransacaoProcessada{
 		Transacao:  transacao.ID(),
-		Provedor:   string(req.Provedor),
-		Externo:    string(req.TransacaoExterna),
+		Provedor:   string(transacao.Provedor()),
+		Externo:    string(transacao.TransacaoExterna()),
 		Carteira:   transacao.Carteira(),
 		Tipo:       string(transacao.Tipo()),
 		Resultado:  resultado,
