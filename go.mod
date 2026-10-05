@@ -3,6 +3,7 @@ module github.com/LuisMassuchini/backend-challenge-go
 go 1.27.0
 
 require (
+	github.com/google/uuid v1.6.0 // indirect
 	go.uber.org/dig v1.19.0 // indirect
 	go.uber.org/fx v1.24.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
