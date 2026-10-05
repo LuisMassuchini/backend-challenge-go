@@ -278,7 +278,7 @@ func (w *Worker) tratar(ctx context.Context, mensagem sqs.Mensagem) bool {
 		}
 	}()
 
-	comando, err := comandoDaMensagem(mensagem.Corpo)
+	comando, err := comandoDaMensagem(mensagem)
 	if err != nil {
 		// Mensagem malformada nao melhora com repeticao: o produtor mandou algo que
 		// este servico nao entende, e reentregar seria repetir o erro um numero
@@ -388,27 +388,34 @@ func (w *Worker) apagar(ctx context.Context, mensagem sqs.Mensagem) bool {
 }
 
 // comandoDaMensagem converte o corpo no comando de caso de uso.
-func comandoDaMensagem(corpo string) (app.RequisicaoOperacao, error) {
-	var mensagem MensagemOperacao
-	if err := json.Unmarshal([]byte(corpo), &mensagem); err != nil {
+// comandoDaMensagem converte a mensagem no comando de caso de uso.
+//
+// A funcao recebe a `sqs.Mensagem` inteira, e nao so o corpo, porque o comando precisa
+// do `messageId` da fila: e ele a identidade duravel da mensagem, e sem ele a inbox nao
+// tem o que registrar. Passar so o corpo -- que foi o que a E13 fez -- deixava o
+// `MensagemID` vazio, e a inbox nunca recebia nada, sem que nenhum teste percebesse
+// porque a deduplicacao por chave de idempotencia ja resolvia a reentrega.
+func comandoDaMensagem(mensagem sqs.Mensagem) (app.RequisicaoOperacao, error) {
+	var corpo MensagemOperacao
+	if err := json.Unmarshal([]byte(mensagem.Corpo), &corpo); err != nil {
 		return app.RequisicaoOperacao{}, &erroDeMensagem{motivo: "corpo nao e JSON: " + err.Error()}
 	}
 
-	if mensagem.IdempotencyKey == "" {
+	if corpo.IdempotencyKey == "" {
 		return app.RequisicaoOperacao{}, &erroDeMensagem{
 			motivo: "idempotencyKey ausente: sem chave o servidor nao pode prometer que reentregar nao move dinheiro duas vezes"}
 	}
 
-	valor, err := money.Parse(mensagem.Money.Amount, money.Currency(mensagem.Money.Currency))
+	valor, err := money.Parse(corpo.Money.Amount, money.Currency(corpo.Money.Currency))
 	if err != nil {
 		return app.RequisicaoOperacao{}, &erroDeMensagem{motivo: "money invalido: " + err.Error()}
 	}
 
-	jogador, err := wallet.IdentificadorDe(mensagem.PlayerId)
+	jogador, err := wallet.IdentificadorDe(corpo.PlayerId)
 	if err != nil {
 		return app.RequisicaoOperacao{}, &erroDeMensagem{motivo: "playerId invalido"}
 	}
-	carteira, err := wallet.IdentificadorDe(mensagem.WalletId)
+	carteira, err := wallet.IdentificadorDe(corpo.WalletId)
 	if err != nil {
 		return app.RequisicaoOperacao{}, &erroDeMensagem{motivo: "walletId invalido"}
 	}
@@ -417,31 +424,31 @@ func comandoDaMensagem(corpo string) (app.RequisicaoOperacao, error) {
 	// HTTP. E o que faz a mesma operacao ser reconhecida como a mesma quando chega
 	// pelo outro caminho.
 	resumo := fingerprint.Calcular(fingerprint.Entrada{
-		Provedor:   mensagem.ProviderId,
-		Externa:    mensagem.ExternalTransactionId,
-		Jogador:    mensagem.PlayerId,
-		Carteira:   mensagem.WalletId,
-		Rodada:     mensagem.RoundId,
-		Jogo:       mensagem.GameId,
-		Tipo:       mensagem.Kind,
+		Provedor:   corpo.ProviderId,
+		Externa:    corpo.ExternalTransactionId,
+		Jogador:    corpo.PlayerId,
+		Carteira:   corpo.WalletId,
+		Rodada:     corpo.RoundId,
+		Jogo:       corpo.GameId,
+		Tipo:       corpo.Kind,
 		Valor:      valor.Decimal(),
 		Moeda:      string(valor.Currency()),
-		Referencia: mensagem.ReferenceExternalTransactionId,
+		Referencia: corpo.ReferenceExternalTransactionId,
 	})
 
 	return app.RequisicaoOperacao{
-		Provedor:         wagering.Provedor(mensagem.ProviderId),
-		TransacaoExterna: wagering.Externo(mensagem.ExternalTransactionId),
-		Chave:            wagering.Chave(mensagem.IdempotencyKey),
+		Provedor:         wagering.Provedor(corpo.ProviderId),
+		TransacaoExterna: wagering.Externo(corpo.ExternalTransactionId),
+		Chave:            wagering.Chave(corpo.IdempotencyKey),
 		Fingerprint:      wagering.Hash(resumo),
 		Carteira:         carteira,
 		Jogador:          jogador,
-		Rodada:           wagering.Rodada(mensagem.RoundId),
-		Jogo:             wagering.Jogo(mensagem.GameId),
-		Tipo:             wagering.Tipo(mensagem.Kind),
+		Rodada:           wagering.Rodada(corpo.RoundId),
+		Jogo:             wagering.Jogo(corpo.GameId),
+		Tipo:             wagering.Tipo(corpo.Kind),
 		Valor:            valor,
-		Referencia:       wagering.Referencia{Externa: wagering.Externo(mensagem.ReferenceExternalTransactionId)},
-		MensagemID:       "",
+		Referencia:       wagering.Referencia{Externa: wagering.Externo(corpo.ReferenceExternalTransactionId)},
+		MensagemID:       mensagem.ID,
 		Consumidor:       nomeDoConsumidor,
 	}, nil
 }

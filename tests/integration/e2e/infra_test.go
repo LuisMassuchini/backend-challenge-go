@@ -19,6 +19,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,6 +31,8 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
+
 	"github.com/google/uuid"
 
 	runtime "github.com/LuisMassuchini/backend-challenge-go/internal/runtime/app"
@@ -39,6 +42,10 @@ import (
 
 // dsnRuntime e o papel de menor privilegio, o mesmo que a aplicacao usa.
 const dsnRuntime = "postgres://wager_app:wager_app@localhost:5432/wager?sslmode=disable"
+
+// dsnDono e o papel de dono do schema, para as verificacoes que nao passam
+// pela aplicacao.
+const dsnDono = "postgres://wager:wager@localhost:5432/wager?sslmode=disable"
 
 // numeroDeInstancias e quantos processos sobem.
 //
@@ -636,25 +643,72 @@ func abs(v int64) int64 {
 	return v
 }
 
+// contarMensagensNaInbox devolve quantas mensagens o consumidor registrou.
+//
+// A leitura e pelo SQL e nao pela API porque nao existe rota de inbox, e o que se quer
+// verificar e a chegada da mensagem -- um fato de infraestrutura, nao de contrato. Um
+// teste que esperasse pela API nao teria o que consultar.
+func contarMensagensNaInbox(t *testing.T) int {
+	t.Helper()
+
+	db, err := abrirLeitura(t)
+	if err != nil {
+		return 0
+	}
+	defer db.Close()
+
+	var total int
+	//nolint:errcheck
+	err = db.QueryRow("SELECT count(*) FROM inbox_messages").Scan(&total)
+	if err != nil {
+		return 0
+	}
+	return total
+}
+
+// abrirLeitura abre uma conexao de leitura com o papel de dono.
+//
+// O dono e o papel de menor privilegio nao seria alcancado aqui: a contagem e uma
+// verificacao de teste, e nao parte do caminho que se quer provar.
+func abrirLeitura(t *testing.T) (*sql.DB, error) {
+	t.Helper()
+	return sql.Open("pgx", dsnDono)
+}
+
 // esperarAte repete a condicao ate ela valer ou o prazo acabar.
 //
 // Existe para esperar condicao que depende de outro processo. A diferenca para um
 // `time.Sleep` fixo e que o teste nao fica lento quando a condicao e rapida nem
-// instavel quando ela e lenta. O erro final mostra o que foi medido na ultima
-// tentativa, que e o que ajuda a decidir se o cenario nunca vai passar ou so ainda nao
-// passou.
+// instavel quando ela e lenta.
+//
+// O primeiro intervalo e curto e o crescimento e dobrado, e os dois por um motivo: o
+// consumidor tem long polling de vinte segundos, entao a condicao costuma virar antes
+// disso -- mas um poll unico de duzentos milissegundos transformaria um caso rapido em
+// quase um segundo de espera, e um poll fixo de cinco segundos transformaria o
+// `TestConteudoDiferenteComAMesmaChaveEConflito`, cuja condicao e instantanea, em
+// cinco segundos de espera.
+//
+// O erro final mostra o que foi medido na ultima tentativa, que e o que ajuda a
+// decidir se o cenario nunca vai passar ou so ainda nao passou.
 func esperarAte(t *testing.T, prazo time.Duration, descricao string, condicao func() bool) {
 	t.Helper()
 
 	limite := time.Now().Add(prazo)
-	var ultima string
+	espera := 20 * time.Millisecond
+
 	for time.Now().Before(limite) {
 		if condicao() {
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(espera)
+
+		// Teto no crescimento: um intervalo que chegue a meio segundoaria o atraso de
+		// deteccao em um cenario que depende de outro processo.
+		if espera < 500*time.Millisecond {
+			espera *= 2
+		}
 	}
-	t.Fatalf("a condicao %q nao foi satisfeita em %s. Ultima leitura: %s", descricao, prazo, ultima)
+	t.Fatalf("a condicao %q nao foi satisfeita em %s", descricao, prazo)
 }
 
 // limparBase esvazia as tabelas de negocio no comeco do cenario.

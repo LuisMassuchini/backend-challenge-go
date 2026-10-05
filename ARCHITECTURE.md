@@ -451,6 +451,29 @@ em replay do resultado persistido.
 espero o outro, e e o que permite recuperar trabalho abandonado depois de uma
 interrupcao.
 
+**A inbox do replay e gravada em uma unidade propria, e nao na unidade da
+operacao.** Este nao e um detalhe de estilo: registrar a inbox dentro da unidade que
+pode abortar faz o registro desaparecer junto com o conflito, e a mensagem volta para
+a fila sem deixar rastro, repetindo o mesmo conflito ate a DLQ.
+
+E a ordem importa nos dois sentidos, e o caminho errado custa um `55P03`. Registrar a
+inbox **antes** da busca de idempotencia e o que produz o auto-bloqueio: o `INSERT` da
+inbox segura a linha da mensagem ate o fim daquela unidade, e a unidade do replay tenta
+gravar a MESMA linha e espera pelo lock que ela propria segura. So o `lock_timeout` de
+um segundo desfaz, e o sintoma e uma mensagem que volta para a fila com "lock nao
+disponivel" -- que parece falha de infraestrutura e e, na verdade, auto-bloqueio.
+
+Por isso: **a busca de idempotencia vem primeiro**, e o caminho de replay registra a
+inbox depois, em unidade propria. O caminho que vai aplicar a operacao registra a inbox
+na unidade dele, onde o `INSERT` e a unica escrita na linha.
+
+**`MessageDeduplicationId` precisa ser unica por mensagem, e nao por grupo.** A
+deduplicacao do SQS e uma janela de cinco minutos: duas mensagens do mesmo grupo com a
+mesma chave fazem o broker descartar a segunda. Isso apareceu no primeiro teste de
+cruzamento HTTP/SQS, e o sintoma enganava completamente -- a mensagem conflitante
+nunca chegava ao consumidor e o teste falhava dizendo "a inbox nao registrou", quando o
+que faltava era a publicacao.
+
 **A chave de particao da saida e o `aggregateId` do evento.** Esta era uma das duas
 decisoes que o plano mandava fechar antes de codar o relay, e ela e do agregado e
 nao da carteira nem do provedor pelo motivo seguinte: o agregado ja e o dado que
