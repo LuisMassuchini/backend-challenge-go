@@ -11,6 +11,7 @@ import (
 	"go.uber.org/fx"
 
 	casos "github.com/LuisMassuchini/backend-challenge-go/internal/app"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/outbox"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/runtime/config"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/sqs"
@@ -34,7 +35,11 @@ func (r RelayDaOutbox) Ativa() bool { return r.Relay != nil }
 // O relay existe quando ha SQS configurado, e nao quando ha banco: sem fila de saida
 // nao existe para onde publicar, e um relay sem destino seria um worker que falha em
 // laco contra a propria ausencia de destino.
-func construirRelayDaOutbox(cfg config.Config, servicos casos.Servicos) (RelayDaOutbox, error) {
+func construirRelayDaOutbox(
+	cfg config.Config,
+	servicos casos.Servicos,
+	metricas *obs.Metricas,
+) (RelayDaOutbox, error) {
 	if cfg.SQS.Endpoint == "" {
 		return RelayDaOutbox{}, nil
 	}
@@ -71,6 +76,7 @@ func construirRelayDaOutbox(cfg config.Config, servicos casos.Servicos) (RelayDa
 		Janela:           30 * time.Second,
 		Backoff:          2 * time.Second,
 		MaximoTentativas: 12,
+		Metricas:         metricas,
 	})
 	if err != nil {
 		return RelayDaOutbox{}, fmt.Errorf("relay da outbox: %w", err)

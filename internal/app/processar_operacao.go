@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/money"
@@ -91,6 +92,17 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		return RespostaOperacao{}, err
 	}
 
+	// A medicao comeca aqui e termina no commit, porque e esse o intervalo que o
+	// enunciado chama de latencia de processamento. Comecar depois da validacao
+	// mediria um caminho que o provedor nunca espera.
+	inicio := time.Now()
+	observouErro := true
+	defer func() {
+		if s.Metricas != nil && observouErro {
+			s.Metricas.ObservaOperacao(inicio, "erro")
+		}
+	}()
+
 	agora := s.agora()
 	correlacao := s.correlacao(req.Correlacao)
 
@@ -132,6 +144,7 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		existente, err := s.Transacoes.BuscarPorChave(ctx, q, req.Chave)
 		switch {
 		case err == nil:
+			s.registraDuplicata("chave")
 			resposta, err = responderReplay(existente, req)
 			return err
 		case errors.Is(err, pg.ErrNaoEncontrado):
@@ -145,6 +158,7 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		peloExterno, err := s.Transacoes.BuscarPorProvedorEExterno(ctx, q, req.Provedor, req.TransacaoExterna)
 		switch {
 		case err == nil:
+			s.registraDuplicata("externo")
 			resposta, err = responderReplay(peloExterno, req)
 			return err
 		case errors.Is(err, pg.ErrNaoEncontrado):
@@ -186,6 +200,13 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		// linha e banco fora, lock esgotado ou erro do driver, que sao falhas de
 		// infraestrutura e devem aparecer como erro.
 		//
+		// O conflito de lock tem contagem propria. E a unica falha deste caminho que e
+		// comportamento esperado sob concorrencia -- e sem ela o operador nao distingue
+		// "houve disputa e o sistema resolveu" de "houve falha de banco".
+		if errors.Is(err, pg.ErrConflitoDeVersao) || strings.Contains(err.Error(), "lock_not_available") {
+			s.registraConflitoLock("lock")
+		}
+
 		// Nenhum valor monetario entra. O enunciado proibe payload financeiro completo
 		// no log, e quem precisa do valor consulta o ledger pelo `transactionId`.
 		obs.Log(logOperacao).Error("operacao nao confirmada",
@@ -206,6 +227,21 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 			"replay", resposta.Replay,
 		)
 
+	// O desfecho e contado aqui, e nao no `defer`, porque so o caminho feliz sabe o
+	// estado final. O `defer` acima roda em qualquer retorno e observa com o rotulo
+	// "erro" -- o que faria o caminho feliz ser contado duas vezes, uma por estado e
+	// outra por erro. Por isso `observouErro` desliga o rotulo de erro assim que o
+	// desfecho e conhecido.
+	//
+	// A duplicata ja foi contada no caminho do replay, que e onde a idempotencia a
+	// reconheceu. O desfecho continua contado aqui, porque uma reentrega e uma
+	// operacao que o provedor fez e que o sistema tratou.
+	s.registraDesfecho(string(resposta.Estado))
+	observouErro = true
+
+	if s.Metricas != nil {
+		s.Metricas.ObservaOperacao(inicio, string(resposta.Estado))
+	}
 	return resposta, nil
 }
 

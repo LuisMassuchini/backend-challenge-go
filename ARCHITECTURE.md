@@ -64,6 +64,56 @@ quando cada chamador inventa o nome.
 **A divergencia de reconciliacao sai como erro.** As duas outras respostas do
 reconciliador -- convergente e carteira sem lancamento -- sao Info ou silencio.
 
+### Metricas
+
+**Implementacao propria do formato de exposicao, sem `prometheus/client_golang`.** A
+decisao foi do usuario entre as duas opcoes, e o motivo cabe numa frase: o projeto ja
+recusou ORM e `sqlc` com razao registrada, e uma arvore de dependencias grande para
+gerar texto e o mesmo tipo de decisao. O que o formato pede sao contadores, gauges e
+histogramas com buckets -- cerca de duzentas linhas com um `RWMutex`. O preco esta
+escrito: nao ha exemplares, nao ha `push`, e a agregacao entre processos nao existe.
+
+**Nenhum identificador pode ser rotulo, e a lista e fechada em codigo.**
+`nomesDeRotuloProibidos` recusa `walletId`, `playerId`, `transactionId`, `providerId`,
+`messageId`, `eventId` e `correlationId`. O motivo e cardinalidade, e ele e serio: uma
+serie por carteira faz o numero de series crescer com o numero de clientes, e o
+Prometheus cai de forma silenciosa -- com um `/metrics` que responde 200 e nao carrega
+mais nada. O que nao cabe em rotulo fica no log, que foi feito para guardar identidade.
+
+**`/metrics` e publico, e essa decisao so e defensavel por causa da anterior.** Um
+endpoint aberto que mostra volume de operacao por estado nao expoe dado de cliente; um
+endpoint aberto que mostra volume por carteira expoe. O teste
+`TestMetricasNaoExpoemIdentificadorDeCliente` confirma a promessa em vez de afirmar
+ela, e ele e a razao de a decisao ser aceitavel em vez de descuidada.
+
+**Rotulo com cardinalidade sem limite e recusado em vez de truncado.** Truncar o nome do
+rotulo produziria uma serie que une carteiras diferentes, que e pior que nao ter a
+serie: o painel mostraria um numero que ninguem pode interpretar.
+
+**`/metrics` sem registro responde 404, e nao 200 com corpo vazio.** As duas respostas
+sao indistinguiveis para quem scrapeia, e "sem dado" e "zero" sao coisas diferentes
+para quem le.
+
+**Contador nao tem metodo para subtrair, e valor negativo e ignorado.** Contador que
+desce e contador quebrado: o painel mostraria menos operacoes do que aconteceram, e o
+operador acreditaria. O que precisa descer e gauge, e existe.
+
+**A exposicao e ordenada e estavel entre chamadas.** Duas chamadas iguais precisam dar
+o mesmo texto, porque e o diff entre dois scrapes que revela uma metrica que sumiu -- e
+ordem aleatoria transformaria isso em impossivel de distinguir de uma serie nova.
+
+**O atraso da outbox e medido do `occurred_at` ate a confirmacao.** Medir a partir da
+gravacao do registro daria sempre proximo de zero, que e o mesmo que nao medir.
+
+**Um registro, nao um por componente.** O caso de uso, o relay, o consumidor e o
+servidor HTTP medem no mesmo `Registro`, e sao os valores que `/metrics` expoe. Um
+registro por componente daria quatro visoes que nenhum painel consegue junir.
+
+**A duplicia que vale registrar:** o consumidor repete `MAX_RECEIVE` da politica de
+redrive do broker, porque o `receive count` e a unica fonte que ele tem e a politica nao
+vem na mensagem. O sintoma de a duplicia ficar errada e uma metrica de cartao morto que
+conta na margem -- nem zero quando deveria, nem o valor da fila quando nao.
+
 ---
 
 ## Dinheiro

@@ -28,6 +28,20 @@ import (
 // segunda nao reconheceria a entrega da primeira.
 const nomeDoConsumidor = "wager-service"
 
+// tentativasDaFilaMorta e a partir de qual recebimento a mensagem vai para o cartao
+// morto.
+//
+// O valor espelha o `MAX_RECEIVE` de `deploy/localstack/init/00-filas.sh`, e ele esta
+// aqui duplicado de proposito, nao por esquecimento: o `receive count` da fila e a
+// unica fonte que o consumidor tem, e o valor nao vem na mensagem. A duplicia e o
+// preco de nao ter o parametro da fila na borda, e a alternativa seria expor a
+// politica de redrive no codigo e no script -- dois lugares para mudar quando a
+// politica mudar.
+//
+// O sintoma de a duplicia ficar errada e uma metrica de fila morta que conta na
+// margem: nem zero quando deveria contar, nem o valor da fila quando nao devia.
+const tentativasDaFilaMorta = 3
+
 // MensagemOperacao e o corpo da mensagem da fila.
 //
 // Os nomes sao os mesmos do contrato HTTP. E uma escolha, e nao um acaso: a mesma
@@ -119,6 +133,9 @@ type Worker struct {
 	// processamento e renovada.
 	renovaVisibilidade time.Duration
 
+	// metricas conta retentativa e fila morta, quando ha registro.
+	metricas *obs.Metricas
+
 	// limiteDeVisibilidade e por quanto tempo a visibilidade e estendida quando
 	// o processamento passa do intervalo de renovacao.
 	limiteDeVisibilidade time.Duration
@@ -140,6 +157,12 @@ type Dependencias struct {
 
 	// RenovaVisibilidade e o intervalo de renovacao da visibilidade.
 	RenovaVisibilidade time.Duration
+
+	// Metricas conta retentativa e fila morta.
+	//
+	// Nil desliga a contagem. E o que permite ao consumidor ser montado em teste sem
+	// registro.
+	Metricas *obs.Metricas
 }
 
 // Novo monta o worker.
@@ -160,6 +183,7 @@ func Novo(d Dependencias) *Worker {
 		ocioso:               ocioso,
 		renovaVisibilidade:   renova,
 		limiteDeVisibilidade: 60 * time.Second,
+		metricas:             d.Metricas,
 	}
 }
 
@@ -315,6 +339,19 @@ func (w *Worker) tratar(ctx context.Context, mensagem sqs.Mensagem) bool {
 		// Falha de infraestrutura: a mensagem volta. A idempotencia garante que a
 		// reentrega nao mova dinheiro de novo, e o limite de tentativas da fila leva
 		// o que sempre falha para o cartao morto.
+		//
+		// A contagem distingue os dois destinos: enquanto `tentativas` estiver abaixo
+		// do maximo da fila, a mensagem vai voltar; quando passar, ela foi para o
+		// cartao morto. Um contador so de retentativa esconderia o segundo caso, que e
+		// o que o operador precisa para ir ver o cartao morto.
+		if w.metricas != nil {
+			if mensagem.Tentativas >= tentativasDaFilaMorta {
+				w.metricas.MensagensFilaMorta.Inc("fila", "operacoes")
+			} else {
+				w.metricas.Retentativas.Inc("origem", "operacoes")
+			}
+		}
+
 		obs.Log(registro).
 			Error("operacao falhou, mensagem sera reentregue",
 				"tentativas", mensagem.Tentativas,

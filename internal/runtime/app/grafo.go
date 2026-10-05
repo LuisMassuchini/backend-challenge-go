@@ -16,6 +16,7 @@ import (
 	casos "github.com/LuisMassuchini/backend-challenge-go/internal/app"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/auth"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/httpapi"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/pg"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/runtime/buildinfo"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/runtime/config"
@@ -67,8 +68,23 @@ func construirPool(lc fx.Lifecycle, cfg config.Config) (*pgxpool.Pool, error) {
 	return aberto, nil
 }
 
+// construirRegistro monta o registro de metricas do processo.
+//
+// O registro e unico e compartilhado por construcao: o caso de uso, o relay, o
+// consumidor e o servidor HTTP medem todos no mesmo Registro, e sao os valores que
+// `/metrics` expoe. Um registro por componente daria quatro visoes que nenhum painel
+// consegue junir, e o `wager_operacoes_total` do servidor nao bateria com o do caso
+// de uso.
+//
+// O registro nasce no grafo e nao dentro de um worker porque `/metrics` e uma rota do
+// servidor: se o registro morresse com o worker, a rota responderia vazio sem o
+// processo estar com nada errado.
+func construirRegistro() *obs.Registro {
+	return obs.NovoRegistro()
+}
+
 // construirServicos monta os casos de uso.
-func construirServicos(p *pgxpool.Pool) casos.Servicos {
+func construirServicos(p *pgxpool.Pool, metricas *obs.Metricas) casos.Servicos {
 	return casos.Servicos{
 		Unidade:    pg.NovaUnidade(p),
 		Carteiras:  pg.NovaRepositorioCarteira(),
@@ -78,6 +94,7 @@ func construirServicos(p *pgxpool.Pool) casos.Servicos {
 		Outbox:     pg.NovaRepositorioOutbox(),
 		Relogio:    relogioDoSistema{},
 		Correlacao: func() string { return uuid.NewString() },
+		Metricas:   metricas,
 	}
 }
 
@@ -140,11 +157,16 @@ func construirServidorHTTP(
 	servicos casos.Servicos,
 	validador *auth.Validador,
 	pronto prontidaoE,
+	registro *obs.Registro,
 ) *http.Server {
 
 	deps := httpapi.Dependencias{
 		Servicos: servicos,
 		Pronto:   pronto.Verifica,
+		// O registro vai para a borda porque `/metrics` e uma rota. Sem ele a rota
+		// nao existe, e uma rota que nao existe devolve 404 -- que e uma resposta
+		// diferente de "existe e esta vazia", e o Prometheus precisa da segunda.
+		Metricas: registro,
 	}
 	// O validador entra como ponte, e nao como ponteiro, porque o roteador decide o
 	// que fazer quando ele e nil e um ponteiro nil dentro de uma interface nao e

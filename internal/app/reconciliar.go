@@ -115,6 +115,7 @@ func Reconciliar(ctx context.Context, s Servicos, ator Ator, req RequisicaoRecon
 	// valor monetario formatado, e o par de unidades minimas e o que o alerta precisa
 	// para classificar a gravidade sem obriga quem le a converter.
 	if resposta.Divergente {
+		s.Metricas.ObservaDivergencia()
 		obs.Log(obs.De(ctx).ComCarteira(resposta.Carteira.ID().String())).
 			Error("saldo da carteira diverge do ledger",
 				"centavos_gravado", resposta.SaldoGravado.Amount(),

@@ -76,6 +76,13 @@ type Dependencias struct {
 	// Relogio e a fonte do instante corrente.
 	Relogio Relogio
 
+	// Metricas mede o que o relay publica.
+	//
+	// Nil desliga a medicao. E o que permite ao relay ser montado em teste sem
+	// registro, e o que faz `GET /metrics` responder honestamente quando o processo
+	// nao tem o que medir.
+	Metricas *obs.Metricas
+
 	// Lote e quantos registros sao reservados por ciclo.
 	Lote int
 
@@ -109,6 +116,8 @@ type Relay struct {
 	janela           time.Duration
 	backoff          time.Duration
 	maximoTentativas int
+	// metricas mede o que o relay publica, quando ha registro.
+	metricas *obs.Metricas
 }
 
 // valoresPadrao do relay.
@@ -190,6 +199,7 @@ func Novo(d Dependencias) (*Relay, error) {
 		janela:           janela,
 		backoff:          backoff,
 		maximoTentativas: tentativas,
+		metricas:         d.Metricas,
 	}, nil
 }
 
@@ -318,7 +328,18 @@ func (r *Relay) tratar(ctx context.Context, registro pg.RegistroPendente) error 
 
 	// A confirmacao e DEPOIS da publicacao. Confirmar antes seria o caminho para
 	// perder o evento: o registro sairia da fila sem nunca ter chegado a ninguem.
-	return r.confirmar(ctx, evento)
+	if err := r.confirmar(ctx, registro.Evento); err != nil {
+		return err
+	}
+
+	// O atraso e medido do `OcorreuEm` -- o instante do fato -- ate a confirmacao. E o
+	// intervalo que responde "quanto tempo um evento levou para sair do sistema", e
+	// medir a partir da escrita do registro daria sempre proximo de zero.
+	if r.metricas != nil {
+		r.metricas.EventosPublicados.Inc("tipo", string(evento.Tipo()))
+		r.metricas.DefineAtrasoOutbox(evento.OcorreuEm(), r.relogio.Agora())
+	}
+	return nil
 }
 
 // confirmar marca o registro como publicado.
@@ -385,6 +406,10 @@ func (r *Relay) desistir(ctx context.Context, id wallet.Identificador, causa err
 		return r.outbox.Desistir(ctx, q, id, causa.Error(), r.relogio.Agora())
 	}); err != nil {
 		return err
+	}
+
+	if r.metricas != nil {
+		r.metricas.EventosDesistidos.Inc("tipo", id.String())
 	}
 	return nil
 }

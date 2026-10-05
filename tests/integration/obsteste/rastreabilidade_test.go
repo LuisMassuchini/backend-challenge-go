@@ -465,6 +465,26 @@ func TestCorrelacaoAusenteEGerada(t *testing.T) {
 	}
 }
 
+// httpTestServer e o servidor de teste.
+//
+// E um alias com nome, e nao `*httptest.Server` direto nos dois arquivos, para que a
+// troca de implementacao -- um `net/http` de verdade na E17, com porta efemera -- nao
+// toque em nenhum dos dois.
+type httpTestServer = httptest.Server
+
+// sobeServidor sobe um servidor com as dependencias informadas.
+//
+// Existe separado do `novoAmbiente` porque nem todo teste precisa de Keycloak nem de
+// banco. Um teste de metrica que sobe realm OIDC para conferir uma string e lento sem
+// provar nada: o que importa e a rota e o corpo, e os dois nao dependem de token.
+func sobeServidor(t *testing.T, deps httpapi.Dependencias) *httpTestServer {
+	t.Helper()
+
+	servidor := httptest.NewServer(httpapi.NovoRoteador(deps))
+	t.Cleanup(servidor.Close)
+	return servidor
+}
+
 // jogadorDaCarteira le o jogador dono da carteira.
 //
 // A leitura e pelo caso de uso, e nao pelo SQL, porque o teste verifica
