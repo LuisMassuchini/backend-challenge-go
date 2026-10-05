@@ -123,7 +123,7 @@ func TestProvedorNaoEscreveEmNomeDeOutro(t *testing.T) {
 // Um provedor sem o escopo interno nao abre carteira nem reconcilia.
 //
 // A separacao de escopo esta no IdP e nao no codigo, e este teste verifica que o IdP a
-// impõe. Um teste que so verificasse o codigo da aplicacao provaria que a aplicacao
+// impede. Um teste que so verificasse o codigo da aplicacao provaria que a aplicacao
 // respeita o escopo, e nao que o escopo existe.
 func TestProvedorNaoAbreNemReconcilia(t *testing.T) {
 	limparBase(t)
