@@ -86,7 +86,7 @@ trade-off.
 | Modelagem e arquitetura | 10 | `ARCHITECTURE.md` com decisao e custo, Fx com injecao por construtores, `Actor` na borda | **`fx.Module` nao foi usado: ver 5.3** |
 | Testes | 10 | tres processos, `-race` verde, auth real, treze pacotes de integracao, 16 cenarios de E2E | **nenhuma relevante** |
 | Observabilidade | 5 | logs JSON correlacionados, 12 metricas, `/metrics` publico, health checks | **nenhuma relevante** |
-| Documentacao | 5 | `ARCHITECTURE.md` completo | **`README.md` ainda e o enunciado; nao ha roteiro de reproducao** |
+| Documentacao | 5 | `ARCHITECTURE.md` completo, `COMO-EXECUTAR.md` com roteiro validado contra o Compose | **nenhuma relevante** |
 
 ---
 
@@ -183,19 +183,48 @@ mudar o codigo. Se a avaliacao for estrita, o custo de agrupar em modulos e baix
 mas mexer no grafo funcionando, com tres instancias de teste dependendo dele, nao e
 justificavel por ganho cosmetico.
 
-### 5.4 `README.md` ainda e o enunciado (criterio Documentacao, 5 pontos)
+### 5.4 ~~Falta roteiro de reproducao~~ **FECHADO NESTA ETAPA (E19)**
 
 O enunciado pede um `README.md` da solucao com pre-requisitos, variaveis de ambiente,
 inicializacao das filas, aplicacao e reversao das migrations, execucao, exemplos de
 chamada e comandos de teste.
 
-**Estado:** `docs/ambiente.md` e `.env.example` tem o essencial; `ARCHITECTURE.md` tem
-as decisoes. O roteiro de ponta a ponta nao existe, e o `docker-compose.yml` nao tem o
-servico da aplicacao.
+**O que foi escrito:** `COMO-EXECUTAR.md`, na raiz, em onze secoes na ordem em que a
+pessoa encontra. E o `docker-compose.yml` ganhou os dois servicos que faltavam.
 
-**Preco:** e o que a E19 faz. Mas a auditoria registra aqui porque e o que impede
-qualquer avaliador de rodar o projeto, e um projeto que o avaliador nao consegue rodar
-perde pontos nos outros criterios tambem.
+O `README.md` continua sendo o enunciado, sem alteracao: o portao de ASCII o exclui de
+proposito (ele tem acentuacao por ser texto do desafio), e sobrescrever o enunciado com a
+solucao destruiria a referencia que a auditoria compara.
+
+**O roteiro foi escrito contra o Compose rodando, nao contra o codigo.** Cada exemplo de
+chamada desta secao foi executado contra o container de verdade, e tres coisas sairam
+disso que a leitura do codigo nao teria dito:
+
+- **A carteira devolve `id`, e nao `walletId`.** O `playerId` vai no corpo e o `id` e
+  gerado. Usar o `walletId` enviado na abertura em uma operacao seguinte devolve
+  `erro_interno` com `violates foreign key constraint "wager_transactions_wallet_id_fkey"`,
+  que parece bug e e uso incorreto da API.
+- **O `Idempotency-Key` e obrigatorio e o `providerId` do corpo tem de bater com o `azp`
+  do token.** As duas recusas sao `403` com motivo nomeado, e o roteiro mostra qual token
+  usar em cada operacao.
+- **O `WAGER_OIDC_URL_JWKS` precisa de endereco interno.** Com o issuer em
+  `localhost:8081` e sem essa variavel, toda chamada autenticada responde `401
+  credencial_invalida` -- a falha de rede na busca da chave volta com o codigo de um
+  token invalido de verdade. E o motivo de `WAGER_OIDC_URL_JWKS` existir separada do
+  issuer.
+
+**A imagem final e distroless, e isso custou um subcomando.** O `healthcheck` do Compose
+precisa de um `CMD`, e nao ha curl, nem wget, nem shell na imagem. Em vez de um script,
+o proprio binario ganhou o subcomando `healthcheck`, que consulta o proprio
+`/health/live`. A alternativa -- `CMD-SHELL` com curl -- daria `exec: curl: not found`
+no primeiro start, e o sintoma (servico `unhealthy` logo apos subir, sem erro visivel)
+aponta para a imagem, nao para o Compose.
+
+**O `migrate` e servico separado e depende de `service_completed_successfully`.** Quem
+aplica migration tem DDL e quem roda o servico nao; misturar obrigaria a aplicacao a
+carregar o dono do banco em tempo de execucao, que e o privilegio que a migration 00004
+existe para remover. Esperar "ate o comeco" em vez de "ate o fim" faria a primeira
+conexao do processo cair numa tabela que ainda nao existe.
 
 ---
 
@@ -260,25 +289,43 @@ contagem e duracao.
 
 ---
 
-## 7. O que a auditoria mudou no codigo
+## 7. O que mudou no codigo
 
 | Mudanca | Motivo |
 |---|---|
 | `00008_nota_de_retentativa_em_processed.sql` | Defeito 6.1: constraint que impedia registrar retomada bem-sucedida |
 | `internal/obs/metrica.go` | Explicar o `float64` de metrica para o eliminatorio 3 |
 | `e2e/reversao_test.go` (2 cenarios) | Fechar os cenarios 7 e 8 do enunciado |
+| `docker-compose.yml`: servicos `migrate` e `wager-service` | Fechar 5.4: sem o servico, o avaliador nao roda o projeto |
+| `Dockerfile`: binario `migrate` na mesma imagem | O `migrate` roda em container separado e nao pode depender de volume de codigo |
+| `internal/runtime/healthcheck/` + subcomando `healthcheck` | Imagem distroless nao tem curl, nem wget, nem shell para o probe |
+| `COMO-EXECUTAR.md` | Fechar 5.4: roteiro de ponta a ponta, validado contra o Compose |
 | `docs/auditoria.md` | Este arquivo |
 
 ---
 
 ## 8. Ordem sugerida das proximas etapas
 
-1. **E19** -- Compose com o servico e README de reproducao. Sem isso o avaliador nao
-   roda o projeto, e um projeto que o avaliador nao consegue rodar perde pontos nos
-   outros criterios tambem.
-2. **Fechar 5.1** -- o crash entre commit e remocao da mensagem. O unico cenario do
+1. **Fechar 5.1** -- o crash entre commit e remocao da mensagem. O unico cenario do
    enunciado sem teste dedicado, e o mais caro: exige um shutdown que nao espera os
    hooks, ou matar o processo.
-3. **5.3** -- a decisao sobre `fx.Module`, registrada em `ARCHITECTURE.md` com o
-   argumento de que e agrupamento cosmetico.
-4. **E20** -- carga, E21 -- documentacao final.
+2. **E20** -- carga com k6. **Rodar com o `wager-service` do Compose parado**: ele consome a
+   mesma fila dos testes e faz `pendenciasteste` falhar com "pendencia nao retomada" e
+   `deadlock`, que imita bug de concorrencia sem ser um.
+3. **5.3** -- a decisao sobre `fx.Module`, ja registrada em `ARCHITECTURE.md` com o
+   argumento de que e agrupamento cosmetico; falta so decidir se o avaliador e estrito
+   o bastante para reprovar por isso.
+4. **E21** -- documentacao final.
+
+### O que a E19 custou em correcao, e nao em escrita
+
+O roteiro foi escrito depois de rodar o Compose, e tres coisas apareceram que a leitura do
+codigo nao apontava: o `id` gerado da carteira, o `Idempotency-Key` obrigatorio com
+`providerId` batendo no `azp`, e o JWKS precisando de endereco interno. **Nenhuma das tres
+e defeito** -- sao contratos que existem e funcionam. Mas uma pessoa seguindo um roteiro
+escrito so pela leitura do codigo erraria as tres, e a primeira delas devolve um
+`erro_interno` com nome de constraint, que parece defeito.
+
+E o padrao que vale para as proximas etapas: **documentacao de execucao se escreve
+rodando, nao escrevendo.** Um exemplo de `curl` que nunca foi executado e uma afirmacao
+sobre o que o programa faz, e as duas coisas divergem.

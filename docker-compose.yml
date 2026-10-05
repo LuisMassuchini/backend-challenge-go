@@ -115,6 +115,125 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # A migration e um servico proprio, e nao um passo do start da aplicacao.
+  #
+  # A razao esta escrita em `cmd/migrate/main.go` e vale repetir aqui, porque este
+  # e o lugar em que alguem vai tentar simplificar: quem aplica migration tem
+  # direito de DDL e quem roda o servico nao. Se a aplicacao aplicasse o schema
+  # na subida, ela teria de carregar o dono do banco em tempo de execucao --
+  # exatamente o privilegio que a migration 00004 existe para remover. Alem disso,
+  # tres instancias subindo juntas executariam tres migrations ao mesmo tempo.
+  #
+  # `service_completed_successfully` e a forma de dizer "a espera e ate o fim, nao
+  # ate o comeco". Um `depends_on` simples com condicao `service_started` iniciaria
+  # a aplicacao junto com a migration, e a primeira conexao do processo cairia
+  # numa tabela que ainda nao existe.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["/migrate"]
+    command: ["up"]
+    environment:
+      # O dono do schema. E o unico lugar do Compose em que `wager:wager` aparece
+      # ligado a um processo: a validacao de configuracao recusa esse par na
+      # aplicacao, e o motivo esta em `internal/runtime/config/infra.go`.
+      WAGER_POSTGRES_DSN: >-
+        postgres://${WAGER_POSTGRES_USER:-wager}:${WAGER_POSTGRES_PASSWORD:-wager}@postgres:5432/${WAGER_POSTGRES_DB:-wager}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  wager-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # O papel de menor privilegio, criado pela migration 00004. A aplicacao
+      # roda com ele e nunca com o dono: e o que faz do ledger append-only uma
+      # garantia do banco e nao apenas do codigo.
+      WAGER_POSTGRES_DSN: >-
+        postgres://wager_app:wager_app@postgres:5432/${WAGER_POSTGRES_DB:-wager}?sslmode=disable
+
+      # O endereco do SQS e do Keycloak aqui e o nome do servico, e nao
+      # `localhost`: dentro da rede do Compose, `localhost` e o proprio
+      # contenedor. Um `localhost` que funciona no host e falha no Compose, e o
+      # sintoma -- recusa de conexao com a aplicacao em execucao e a maquina de
+      # desenvolvimento saudavel -- parece problema do codigo.
+      WAGER_SQS_ENDPOINT: http://localstack:4566
+      WAGER_SQS_FILA_OPERACOES: ${WAGER_SQS_FILA_OPERACOES:-wager-transactions.fifo}
+      WAGER_SQS_FILA_DEAD_LETTER: ${WAGER_SQS_FILA_DEAD_LETTER:-wager-transactions-dlq.fifo}
+      WAGER_SQS_FILA_EVENTOS: ${WAGER_SQS_FILA_EVENTOS:-wager-events.fifo}
+      # Quatro tentativas em vez das tres do padrao. A diferenca e que o
+      # primeiro processamento depois de uma falha de infraestrutura raramente e
+      # o que vai falhar de novo, e uma mensagem que vai para o cartao morto por
+      # causa de uma falha de rede no Compose e um cartao morto que nao diz nada
+      # sobre o codigo.
+      WAGER_SQS_RECEIVE_COUNT_MAX: "4"
+
+      # O issuer precisa ser o que o token carrega. O Keycloak anuncia o issuer
+      # com o nome externo do container, porque e assim que ele foi alcancado
+      # para emitir o token; entao `localhost:8081` aqui quebraria a validacao
+      # com um erro de `iss` que parece problema de chave.
+      WAGER_OIDC_ISSUER: http://${WAGER_KEYCLOAK_HOST:-localhost}:${WAGER_KEYCLOAK_PORT:-8081}/realms/wager
+      WAGER_OIDC_AUDIENCE: ${WAGER_OIDC_AUDIENCE:-wager-service}
+
+      # O JWKS e a UNICA parte do OIDC que precisa de endereco interno, e o issuer
+      # nao pode ser.
+      #
+      # Sao duas perguntas diferentes: "o token foi emitido por este realm?" se
+      # responde comparando a string `iss` com o Issuer, e "qual a chave publica?"
+      # exige uma chamada de rede. A string `iss` precisa bater com o que o Keycloak
+      # announceou -- e ele anuncia o endereco externo. Mas a busca da
+      # chave sai do container, e `localhost:8081` la dentro e o proprio
+      # wager-service, que nao e o Keycloak.
+      #
+      # Sem esta linha o sintoma e `401 credencial_invalida` com o log mostrando
+      # `o token nao passou na verificacao` e nada mais: a falha de rede na busca
+      # da chave e devolvida como recusa de token, que e o mesmo codigo de um token
+      # de verdade invalido. Por isso `WAGER_OIDC_URL_JWKS` existe como variavel
+      # separada em vez de o issuer ser derivado -- os dois enderecos sao o mesmo
+      # realm visto de dois lugares, e so um dos dois e alcancavel do container.
+      #
+      # O roteiro completo, com os exemplos de chamada, esta em `COMO-EXECUTAR.md`.
+      WAGER_OIDC_URL_JWKS: http://keycloak:8080/realms/wager/protocol/openid-connect/certs
+
+      WAGER_HTTP_ADDRESS: :8080
+      WAGER_LOG_LEVEL: ${WAGER_LOG_LEVEL:-info}
+    ports:
+      - "${WAGER_HTTP_PORT:-8080}:8080"
+    depends_on:
+      # O banco precisa de schema aplicado, e o start do LocalStack garante que a
+      # fila existe -- o consumidor que falha com NonExistentQueue na partida e um
+      # consumidor que nunca vai se recuperar sozinho.
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      # A imagem final e distroless e nao tem curl nem wget, entao o probe usa o
+      # proprio processo, que e a unica coisa garantidamente presente. `/health/live`
+      # e o certo aqui e nao `/health/ready`: liveness responde sem tocar em
+      # dependencia, e um probe que consulta o banco derruba o processo quando o
+      # banco cai -- que e o oposto do desejado, porque o banco voltando nao traz
+      # o processo de volta.
+      #
+      # O probe e o proprio binario em modo de diagnose, nao um script: distroless
+      # nao tem shell, nem curl, nem wget. Em forma de string, e nao de lista, porque
+      # e assim que o Compose le um `CMD` sem shell -- a forma de lista aninhada e
+      # recusada na validacao.
+      test: ["CMD", "/wager-service", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
 volumes:
   postgres-dados:
   localstack-dados:
