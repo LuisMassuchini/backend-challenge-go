@@ -5,6 +5,7 @@ package repositorios
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wagering"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wallet"
@@ -377,7 +378,7 @@ func TestMarcaReferenciaPendente(t *testing.T) {
 	}
 
 	if err := unidade.Executar(ctx, func(q pg.Querente) error {
-		return repositorio.MarcarPendentePorReferencia(ctx, q, reversao.ID())
+		return repositorio.MarcarPendentePorReferencia(ctx, q, reversao.ID(), time.Now().UTC())
 	}); err != nil {
 		t.Fatalf("marcacao: %v", err)
 	}
@@ -399,7 +400,7 @@ func TestMarcaReferenciaPendente(t *testing.T) {
 
 	// A segunda marcacao falha: ja nao esta em PENDING.
 	err = unidade.Executar(ctx, func(q pg.Querente) error {
-		return repositorio.MarcarPendentePorReferencia(ctx, q, reversao.ID())
+		return repositorio.MarcarPendentePorReferencia(ctx, q, reversao.ID(), time.Now().UTC())
 	})
 	if !errors.Is(err, pg.ErrConclusaoImpossivel) {
 		t.Errorf("devolveu %v, esperado ErrConclusaoImpossivel", err)

@@ -238,21 +238,24 @@ func (r RepositorioTransacoes) Concluir(
 	return nil
 }
 
-// MarcarPendentePorReferencia leva a transacao a PENDING_REFERENCE.
+// MarcarPendentePorReferencia leva a transacao a PENDING_REFERENCE e a torna elegivel
+// de imediato.
 //
-// A tentativa e um numero, e nao um instante: o worker de referencias conta
-// tentativas e o TTL sao contados a partir delas, e um instante de ultima tentativa
-// nao responde "quantas vezes ja tentamos" sem uma segunda coluna.
+// O agendamento e resetado aqui, e nao deixado com o padrao da coluna, porque uma
+// pendencia que ja nasceu com data de criacao seria encontrada pela primeira
+// varredura do worker por acaso -- o que funciona ate alguem mudar o padrao e o
+// worker passar a silenciar pendencias por um dia inteiro.
 func (r RepositorioTransacoes) MarcarPendentePorReferencia(
 	ctx context.Context,
 	q Querente,
 	id wallet.Identificador,
+	agora time.Time,
 ) error {
 	tag, err := q.Exec(ctx, `
 		UPDATE wager_transactions
-		   SET state = 'PENDING_REFERENCE', updated_at = $2
+		   SET state = 'PENDING_REFERENCE', next_retry_at = $2, updated_at = $2
 		 WHERE id = $1 AND state = 'PENDING'`,
-		id.UUID(), time.Now().UTC(),
+		id.UUID(), agora,
 	)
 	if err != nil {
 		return classificarErroDeEscrita(err, fmt.Errorf("pg: marcacao de referencia pendente: %w", err))

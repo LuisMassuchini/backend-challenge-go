@@ -159,89 +159,10 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 			return err
 		}
 
-		switch desfecho.tipo {
-		case desfechoRecusada:
-			// A recusa e uma conclusao legitima: a transacao fica REJECTED com o
-			// codigo, o evento de rejeicao e gravado, e o commit acontece. E o que o
-			// provedor consulta depois, e desfaze-la deixaria a transacao em
-			// PENDING para sempre.
-			rejeitada, err := transacao.Rejeitar(desfecho.codigo, agora)
-			if err != nil {
-				return err
-			}
-			if err := s.Transacoes.Concluir(ctx, q, rejeitada.ID(), pg.ResultadoGravado{
-				Estado:      rejeitada.Estado(),
-				CodigoFalha: rejeitada.CodigoFalha(),
-			}); err != nil {
-				return err
-			}
-			if err := registrarEventoRejeicao(ctx, s, q, rejeitada, correlacao, agora); err != nil {
-				return err
-			}
-			if err := s.registrarInbox(ctx, q, req, agora); err != nil {
-				return err
-			}
-			resposta = RespostaOperacao{
-				Estado:      rejeitada.Estado(),
-				Saldo:       carteira.Saldo(),
-				CodigoFalha: rejeitada.CodigoFalha(),
-				TransacaoID: rejeitada.ID(),
-			}
-			return nil
-
-		case desfechoPendente:
-			// A referencia ainda nao chegou. Isso nao e recusa nem sucesso: e
-			// espera, e o worker de referencias assume depois.
-			if err := s.Transacoes.MarcarPendentePorReferencia(ctx, q, transacao.ID()); err != nil {
-				return err
-			}
-			if err := s.registrarInbox(ctx, q, req, agora); err != nil {
-				return err
-			}
-			resposta = RespostaOperacao{
-				// O estado vem da constante, e nao da transacao em memoria: em
-				// memoria a transacao continua PENDING, e quem consulta e o banco,
-				// onde o estado gravado e PENDING_REFERENCE.
-				Estado:      wagering.EstadoPendenteReferencia,
-				Saldo:       carteira.Saldo(),
-				TransacaoID: transacao.ID(),
-			}
-			return nil
-		}
-
-		// Caminho feliz: o lancamento, a conclusao e o evento.
-		if desfecho.lancamento.Valida() {
-			if err := s.Ledger.Inserir(ctx, q, desfecho.lancamento); err != nil {
-				return err
-			}
-			if err := s.Carteiras.AtualizarSaldo(ctx, q, desfecho.carteira); err != nil {
-				return err
-			}
-			if err := registrarEventoDeSaldo(ctx, s, q, desfecho.lancamento, transacao,
-				desfecho.carteira.Versao(), correlacao, agora); err != nil {
-				return err
-			}
-		}
-
-		if err := s.Transacoes.Concluir(ctx, q, transacao.ID(), pg.ResultadoGravado{
-			Estado:    wagering.EstadoProcessado,
-			Resultado: desfecho.carteira.Saldo(),
-		}); err != nil {
+		if err := s.confirmar(ctx, q, transacao, carteira, desfecho, req, correlacao, agora); err != nil {
 			return err
 		}
-		if err := registrarEventoProcessada(ctx, s, q, transacao, req,
-			desfecho.carteira.Saldo(), correlacao, agora); err != nil {
-			return err
-		}
-		if err := s.registrarInbox(ctx, q, req, agora); err != nil {
-			return err
-		}
-
-		resposta = RespostaOperacao{
-			Estado:      wagering.EstadoProcessado,
-			Saldo:       desfecho.carteira.Saldo(),
-			TransacaoID: transacao.ID(),
-		}
+		resposta = respostaDoDesfecho(transacao, carteira, desfecho)
 		return nil
 	})
 	if err != nil {
@@ -249,6 +170,110 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 	}
 
 	return resposta, nil
+}
+
+// confirmar grava o desfecho na unidade.
+//
+// A funcao existe para que a retomada de uma pendencia e o processamento de uma
+// operacao nova gravem exatamente o mesmo. Uma segunda implementacao do bloco de
+// conclusao seria o caminho mais curto para um estorno retomado registrar lancamento
+// sem atualizar a carteira, que e a diferenca que a reconciliacao existe para
+// encontrar.
+//
+// O inbox fica de fora de proposito: ele pertence a entrega da mensagem, e a
+// retomada nao tem mensagem nova para registrar.
+func (s Servicos) confirmar(
+	ctx context.Context,
+	q pg.Querente,
+	transacao wagering.Transacao,
+	carteira wallet.Carteira,
+	desfecho desfecho,
+	req RequisicaoOperacao,
+	correlacao string,
+	agora time.Time,
+) error {
+	switch desfecho.tipo {
+	case desfechoRecusada:
+		// A recusa e uma conclusao legitima: a transacao fica REJECTED com o codigo,
+		// o evento de rejeicao e gravado, e o commit acontece. E o que o provedor
+		// consulta depois, e desfaze-la deixaria a transacao em PENDING para sempre.
+		rejeitada, err := transacao.Rejeitar(desfecho.codigo, agora)
+		if err != nil {
+			return err
+		}
+		if err := s.Transacoes.Concluir(ctx, q, rejeitada.ID(), pg.ResultadoGravado{
+			Estado:      rejeitada.Estado(),
+			CodigoFalha: rejeitada.CodigoFalha(),
+		}); err != nil {
+			return err
+		}
+		if err := registrarEventoRejeicao(ctx, s, q, rejeitada, correlacao, agora); err != nil {
+			return err
+		}
+		return nil
+
+	case desfechoPendente:
+		// A referencia ainda nao chegou. Isso nao e recusa nem sucesso: e espera, e o
+		// worker de referencias assume depois.
+		return s.Transacoes.MarcarPendentePorReferencia(ctx, q, transacao.ID(), agora)
+	}
+
+	// Caminho feliz: o lancamento, a conclusao e o evento.
+	if desfecho.lancamento.Valida() {
+		if err := s.Ledger.Inserir(ctx, q, desfecho.lancamento); err != nil {
+			return err
+		}
+		if err := s.Carteiras.AtualizarSaldo(ctx, q, desfecho.carteira); err != nil {
+			return err
+		}
+		if err := registrarEventoDeSaldo(ctx, s, q, desfecho.lancamento, transacao,
+			desfecho.carteira.Versao(), correlacao, agora); err != nil {
+			return err
+		}
+	}
+
+	if err := s.Transacoes.Concluir(ctx, q, transacao.ID(), pg.ResultadoGravado{
+		Estado:    wagering.EstadoProcessado,
+		Resultado: desfecho.carteira.Saldo(),
+	}); err != nil {
+		return err
+	}
+	return registrarEventoProcessada(ctx, s, q, transacao,
+		desfecho.carteira.Saldo(), correlacao, agora)
+}
+
+// respostaDoDesfecho monta a resposta a partir do que foi confirmado.
+//
+// Os tres casos leem o estado do desfecho e nao o da transacao em memoria. A
+// transacao em memoria continua PENDING depois de marcada como pendente por
+// referencia, e quem consulta e o banco.
+func respostaDoDesfecho(
+	transacao wagering.Transacao,
+	carteira wallet.Carteira,
+	desfecho desfecho,
+) RespostaOperacao {
+	switch desfecho.tipo {
+	case desfechoRecusada:
+		return RespostaOperacao{
+			Estado:      wagering.EstadoRejeitado,
+			Saldo:       carteira.Saldo(),
+			CodigoFalha: desfecho.codigo,
+			TransacaoID: transacao.ID(),
+		}
+
+	case desfechoPendente:
+		return RespostaOperacao{
+			Estado:      wagering.EstadoPendenteReferencia,
+			Saldo:       carteira.Saldo(),
+			TransacaoID: transacao.ID(),
+		}
+	}
+
+	return RespostaOperacao{
+		Estado:      wagering.EstadoProcessado,
+		Saldo:       desfecho.carteira.Saldo(),
+		TransacaoID: transacao.ID(),
+	}
 }
 
 // tipos de desfecho possiveis de uma operacao.
@@ -300,18 +325,26 @@ func resolver(
 	var referenciante *wagering.Transacao
 
 	if transacao.Tipo().ExigeReferencia() {
-		resolvida, referenciada, pendente, err := resolverReferencia(ctx, s, q, transacao, agora)
+		referencia, err := resolverReferencia(ctx, s, q, transacao, agora)
 		if err != nil {
 			return desfecho{}, err
 		}
-		if pendente {
+		// Recusa da politica de reversao e desfecho, e nao erro. Devolvela como
+		// faria a unidade inteira reverter e deixaria a transacao em PENDING para
+		// sempre, sem resposta para o provedor -- que foi o primeiro defeito corrigido
+		// em E9, e reapareceu aqui pelo mesmo caminho.
+		if referencia.recusa != nil {
+			return desfecho{tipo: desfechoRecusada, codigo: referencia.recusa.Codigo}, nil
+		}
+		if !referencia.resolvida {
 			return desfecho{tipo: desfechoPendente, carteira: carteira}, nil
 		}
-		transacao = resolvida
+
+		transacao = referencia.transacao
 		// A referenciada segue adiante porque o dominio usa o lancamento original
 		// para montar o lancamento inverso. Passar nil aqui faria o proprio dominio
 		// recusar a reversao, e a recusa chegaria ao provedor como se fosse saldo.
-		referenciante = &referenciada
+		referenciante = referencia.referenciada
 	}
 
 	// O movimento. LOSS chega aqui sem efeito e devolve a carteira intacta, com
@@ -328,12 +361,33 @@ func resolver(
 	}, nil
 }
 
+// resultadoDaReferencia e o que a busca da referencia produz.
+//
+// Um tipo com nome, e nao quatro valores de retorno, porque os quatro se confundem
+// com frequencia: "nao encontrei" e "encontrei mas a politica recusa" sao ambos
+// ausencias de movimento, e so um deles e espera. O tipo torna a distincao visivel na
+// assinatura.
+type resultadoDaReferencia struct {
+	// resolvida informa que a referencia foi encontrada e validada.
+	resolvida bool
+
+	// transacao e a reversao com a referencia interna gravada.
+	transacao wagering.Transacao
+
+	// referenciada e a operacao que a reversao desfaz.
+	referenciada *wagering.Transacao
+
+	// recusa e a falha de politica, quando a referencia existe mas nao pode ser
+	// desfeita.
+	recusa *wagering.FalhaDeRegra
+}
+
 // resolverReferencia procura a transacao referenciada e valida a politica de
 // reversao.
 //
-// Devolve pendente quando a referencia ainda nao chegou, que e espera e nao recusa:
-// uma reversao entregue antes da aposta e exatamente o caso que o enunciado exige
-// suportar.
+// Tres desfechos, e a distincao entre eles e o que separa espera de recusa:
+// a referencia ainda nao chegou e espera; a referencia chegou e a politica recusa e
+// conclusao; e a referencia chegou e pode ser desfeita.
 //
 // Devolve a reversao resolvida e a transacao referenciada. As duas sao necessarias:
 // a primeira e o que vai para o banco, a segunda e o que o dominio usa para montar
@@ -344,20 +398,21 @@ func resolverReferencia(
 	q pg.Querente,
 	transacao wagering.Transacao,
 	agora time.Time,
-) (wagering.Transacao, wagering.Transacao, bool, error) {
+) (resultadoDaReferencia, error) {
 	referenciada, err := s.Transacoes.BuscarPorProvedorEExterno(
 		ctx, q, transacao.Provedor(), transacao.Referencia().Externa,
 	)
 	if err != nil {
 		if errors.Is(err, pg.ErrNaoEncontrado) {
-			return transacao, wagering.Transacao{}, true, nil
+			// Ainda nao chegou. E espera, e o worker de pendencias assume depois.
+			return resultadoDaReferencia{}, nil
 		}
-		return transacao, wagering.Transacao{}, false, fmt.Errorf("referencia: %w", err)
+		return resultadoDaReferencia{}, fmt.Errorf("referencia: %w", err)
 	}
 
 	tiposAplicados, err := s.Transacoes.ReversoesSobre(ctx, q, referenciada.ID())
 	if err != nil {
-		return transacao, wagering.Transacao{}, false, err
+		return resultadoDaReferencia{}, err
 	}
 
 	// A resolucao vem antes da validacao, e a ordem e obrigatoria: a politica de
@@ -366,18 +421,26 @@ func resolverReferencia(
 	// REFERENCIA_NAO_ENCONTRADA.
 	resolvida, err := transacao.ResolverReferencia(referenciada.ID(), agora)
 	if err != nil {
-		return transacao, referenciada, false, err
+		return resultadoDaReferencia{}, err
 	}
 
 	if err := resolvida.ValidarReversao(referenciada, tiposAplicados); err != nil {
-		return transacao, referenciada, false, traduzirFalhaDeRegra(err)
+		var recusada *wagering.FalhaDeRegra
+		if errors.As(err, &recusada) {
+			return resultadoDaReferencia{recusa: recusada}, nil
+		}
+		return resultadoDaReferencia{}, traduzirFalhaDeRegra(err)
 	}
 
 	if err := s.Transacoes.ResolverReferencia(ctx, q, transacao.ID(), referenciada.ID()); err != nil {
-		return transacao, referenciada, false, err
+		return resultadoDaReferencia{}, err
 	}
 
-	return resolvida, referenciada, false, nil
+	return resultadoDaReferencia{
+		resolvida:    true,
+		transacao:    resolvida,
+		referenciada: &referenciada,
+	}, nil
 }
 
 // recusaDe converte a recusa do dominio em desfecho recusado.
