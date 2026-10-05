@@ -26,8 +26,14 @@ var (
 	// ErrConflitoDeChave cobre unicidade violada em chave de idempotencia ou em
 	// par provedor e identificador externo.
 	ErrConflitoDeChave = errors.New("pg: chave ja registrada")
-	// ErrSaldosIncoerentes cobre lancamento que o trigger do banco recusou.
-	ErrSaldosIncoerentes = errors.New("pg: lancamento incoerente com o saldo")
+	// ErrSaldoInsuficiente cobre gravacao que violou CHECK (balance >= 0).
+	ErrSaldoInsuficiente = errors.New("pg: saldo insuficiente")
+	// ErrInvarianteViolada cobre violacao de qualquer outra constraint.
+	//
+	// Separado de ErrSaldoInsuficiente porque as duas levam a decisoes
+	// diferentes: saldo insuficiente e regra de negocio com codigo de falha, e
+	// invariante violada e bug de codigo. O log precisa distinguir.
+	ErrInvarianteViolada = errors.New("pg: invariante do banco violada")
 )
 
 // ErrConflitoDeReserva cobre reserva de registro que outro publisher ja pegou.

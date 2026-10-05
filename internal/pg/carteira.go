@@ -235,19 +235,38 @@ func scannerCarteira(linha interface{ Scan(dest ...any) error }) (wallet.Carteir
 // classificarErroDeEscrita traduz violacao de constraint em erro de dominio.
 //
 // Traduzir aqui e nao no caso de uso porque o caso de uso nao deveria conhecer
-// codigo SQLSTATE: ele conhece "conflito de chave" e "saldo insuficiente", que sao
-// as decisoes que ele precisa tomar.
+// codigo SQLSTATE nem nome de constraint: ele conhece "conflito de chave" e "saldo
+// insuficiente", que sao as decisoes que ele precisa tomar.
+//
+// A distincao e feita pelo NOME da constraint, e nao apenas pelo SQLSTATE. A
+// categoria 23514 cobre o saldo negativo da carteira, a coerencia do lancamento e a
+// coerencia entre estado e dados da transacao -- e elas levam a decisoes
+// diferentes: uma e saldo insuficiente, outra e entrada invalida, e a terceira e bug
+// de codigo. Traduzir as tres para "saldo incoerente" fazia o log dizer a coisa
+// errada em dois dos tres casos, que e o que o teste de abertura do E9 revelou.
 func classificarErroDeEscrita(err error, contexto error) error {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
 		return contexto
 	}
 
+	switch pgErr.ConstraintName {
+	case "ck_wallets_saldo_nao_negativo":
+		return fmt.Errorf("%w: %w", ErrSaldoInsuficiente, contexto)
+	case "uq_wallets_jogador_moeda",
+		"uq_transacoes_chave",
+		"uq_transacoes_provedor_externo",
+		"uq_ledger_carteira_transacao",
+		"uq_inbox_consumidor_mensagem",
+		"uq_transacoes_abertura_por_carteira":
+		return fmt.Errorf("%w: %w", ErrConflitoDeChave, contexto)
+	}
+
 	switch pgErr.Code {
 	case "23505": // unique_violation
 		return fmt.Errorf("%w: %w", ErrConflitoDeChave, contexto)
 	case "23514": // check_violation
-		return fmt.Errorf("%w: %w", ErrSaldosIncoerentes, contexto)
+		return fmt.Errorf("%w: %w", ErrInvarianteViolada, contexto)
 	case "40001": // serialization_failure
 		return fmt.Errorf("%w: %w", ErrConflitoDeVersao, contexto)
 	case "55P03": // lock_not_available

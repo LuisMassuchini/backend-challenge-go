@@ -60,9 +60,10 @@ func (r RepositorioTransacoes) Inserir(ctx context.Context, q Querente, t wageri
 		INSERT INTO wager_transactions (
 			id, provider_id, external_transaction_id, idempotency_key, content_hash,
 			wallet_id, player_id, round_id, game_id, kind, money_amount, currency,
-			reference_external_id, state, created_at, updated_at
+			reference_external_id, state, failure_code,
+			result_amount, result_currency, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)`,
 		t.ID().UUID(),
 		ouNulo(t.Provedor().Valida(), t.Provedor()),
 		ouNulo(t.TransacaoExterna().Valida(), t.TransacaoExterna()),
@@ -70,19 +71,49 @@ func (r RepositorioTransacoes) Inserir(ctx context.Context, q Querente, t wageri
 		ouNulo(t.HashConteudo().Valida(), t.HashConteudo()),
 		t.Carteira().UUID(),
 		t.Jogador().UUID(),
-		t.Rodada(),
-		t.Jogo(),
+		ouNulo(t.Rodada().Valida(), t.Rodada()),
+		ouNulo(t.Jogo().Valida(), t.Jogo()),
 		string(t.Tipo()),
 		t.Valor().Amount(),
 		string(t.Valor().Currency()),
 		ouNulo(t.Referencia().Externa.Valida(), t.Referencia().Externa),
 		string(t.Estado()),
+		ouNuloTexto(t.CodigoFalha().Presente(), string(t.CodigoFalha())),
+		resultadoAmount(t),
+		resultadoMoeda(t),
 		t.CriadaEm(),
 	)
 	if err != nil {
 		return classificarErroDeEscrita(err, fmt.Errorf("pg: insercao da transacao: %w", err))
 	}
 	return nil
+}
+
+// resultadoAmount devolve o resultado persistido, ou nil quando a transacao ainda
+// nao terminou.
+//
+// A coluna e NULL em estado nao terminal porque o CHECK de coerencia exige
+// resultado apenas em PROCESSED. E o que permite gravar uma abertura -- que ja nasce
+// PROCESSED, com o resultado -- em um unico INSERT, como o enunciado pede.
+func resultadoAmount(t wagering.Transacao) any {
+	if t.Estado() != wagering.EstadoProcessado {
+		return nil
+	}
+	if !t.Resultado().Valida() {
+		return nil
+	}
+	return t.Resultado().Amount()
+}
+
+// resultadoMoeda devolve a moeda do resultado, ou nil quando nao ha resultado.
+func resultadoMoeda(t wagering.Transacao) any {
+	if t.Estado() != wagering.EstadoProcessado {
+		return nil
+	}
+	if !t.Resultado().Valida() {
+		return nil
+	}
+	return string(t.Resultado().Currency())
 }
 
 // BuscarPorChave devolve a transacao com aquela chave de idempotencia.
@@ -371,6 +402,15 @@ func textoDe(texto *string) string {
 		return ""
 	}
 	return *texto
+}
+
+// ouNuloTexto e ouNulo para valores que sao string tipada e nao implementam
+// fmt.Stringer.
+func ouNuloTexto(condicao bool, valor string) any {
+	if !condicao {
+		return nil
+	}
+	return valor
 }
 
 // ouNulo devolve nil quando a condicao e falsa.

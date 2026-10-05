@@ -17,15 +17,23 @@ import (
 
 // DadosTransacaoProcessada sao os dados de entrada de WagerTransactionProcessed.
 type DadosTransacaoProcessada struct {
-	Transacao  wallet.Identificador
-	Provedor   string
-	Externo    string
-	Carteira   wallet.Identificador
-	Tipo       string
-	Resultado  money.Money
-	Correlacao string
-	Causa      wallet.Identificador
-	OcorridoEm time.Time
+	Transacao wallet.Identificador
+	// OrigemInterna marca o evento que nao veio de provedor.
+	//
+	// Os eventos de origem interna -- a abertura de carteira -- nao tem provedor nem
+	// identificador externo, e o enunciado diz que eles nao exigem os metadados
+	// externos inaplicaveis. Sem esta marca, ou o construtor exigiria metadados que
+	// nao existem, ou aceitaria um evento externo sem providerId e o consumidor nao
+	// saberia de quem e o evento.
+	OrigemInterna bool
+	Provedor      string
+	Externo       string
+	Carteira      wallet.Identificador
+	Tipo          string
+	Resultado     money.Money
+	Correlacao    string
+	Causa         wallet.Identificador
+	OcorridoEm    time.Time
 }
 
 // DadosTransacaoRejeitada sao os dados de entrada de WagerTransactionRejected.
@@ -83,11 +91,13 @@ func NovaTransacaoProcessada(d DadosTransacaoProcessada) (Evento, error) {
 	if err := conferirComum(d.Transacao, d.Carteira, d.Correlacao, d.OcorridoEm); err != nil {
 		return Evento{}, err
 	}
-	if err := conferirTexto("provedor", d.Provedor); err != nil {
-		return Evento{}, err
-	}
-	if err := conferirTexto("transacao externa", d.Externo); err != nil {
-		return Evento{}, err
+	if !d.OrigemInterna {
+		if err := conferirTexto("provedor", d.Provedor); err != nil {
+			return Evento{}, err
+		}
+		if err := conferirTexto("transacao externa", d.Externo); err != nil {
+			return Evento{}, err
+		}
 	}
 	if err := conferirTexto("tipo", d.Tipo); err != nil {
 		return Evento{}, err
