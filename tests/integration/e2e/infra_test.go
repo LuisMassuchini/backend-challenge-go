@@ -720,3 +720,13 @@ func limparBase(t *testing.T) {
 	t.Helper()
 	dbtest.Limpa(t)
 }
+
+// fmtChave devolve a chave de idempotencia de uma operacao do cenario.
+func fmtChave(indice int) string {
+	return "provider-a:relay-" + fmtIndice(indice)
+}
+
+// fmtIndice devolve o indice como texto.
+func fmtIndice(indice int) string {
+	return fmt.Sprintf("%d", indice)
+}

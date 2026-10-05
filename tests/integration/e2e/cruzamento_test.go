@@ -24,6 +24,18 @@ func endpointDoSqs() string {
 	return "http://localhost:4566"
 }
 
+// contextoDeTeste devolve um contexto com prazo.
+//
+// Vive neste arquivo porque e o unico que fala com a fila do SQS, e o prazo de trinta
+// segundos e o que cabe entre o long polling da fila e o tempo maximo de espera do
+// teste.
+func contextoDeTeste(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancelar := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancelar)
+	return ctx
+}
+
 // clienteDaFilaDeOperacoes monta o cliente SQS da fila de entrada.
 func clienteDaFilaDeOperacoes(t *testing.T) *sqs.Cliente {
 	t.Helper()
@@ -83,14 +95,6 @@ func esvaziarFila(t *testing.T, cliente *sqs.Cliente) {
 			}
 		}
 	}
-}
-
-// contextoDeTeste devolve um contexto com prazo.
-func contextoDeTeste(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancelar := context.WithTimeout(context.Background(), 30*time.Second)
-	t.Cleanup(cancelar)
-	return ctx
 }
 
 // MensagemOperacao e o corpo da mensagem de operacao.
