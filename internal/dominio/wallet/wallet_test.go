@@ -189,7 +189,7 @@ func TestDebitoSuficiente(t *testing.T) {
 		t.Fatalf("Nova: %v", err)
 	}
 
-	apos, err := c.Debitar(deveID(t, transacaoA), deveParse(t, "80.00"), instanteFixo())
+	apos, _, err := c.Debitar(deveID(t, transacaoA), deveParse(t, "80.00"), instanteFixo())
 	if err != nil {
 		t.Fatalf("Debitar: %v", err)
 	}
@@ -211,12 +211,12 @@ func TestDebitoInsuficienteRecusaSemAlterarSaldo(t *testing.T) {
 		t.Fatalf("Nova: %v", err)
 	}
 
-	c, err = c.Debitar(deveID(t, transacaoA), deveParse(t, "80.00"), instanteFixo())
+	c, _, err = c.Debitar(deveID(t, transacaoA), deveParse(t, "80.00"), instanteFixo())
 	if err != nil {
 		t.Fatalf("primeiro debito: %v", err)
 	}
 
-	apos, err := c.Debitar(deveID(t, transacaoA), deveParse(t, "80.00"), instanteFixo())
+	apos, _, err := c.Debitar(deveID(t, transacaoA), deveParse(t, "80.00"), instanteFixo())
 	if !errors.Is(err, ErrSaldoInsuficiente) {
 		t.Fatalf("devolveu %v, esperado ErrSaldoInsuficiente", err)
 	}
@@ -233,7 +233,7 @@ func TestDebitoExatamenteIgualAoSaldo(t *testing.T) {
 		t.Fatalf("Nova: %v", err)
 	}
 
-	apos, err := c.Debitar(deveID(t, transacaoA), deveParse(t, "100.00"), instanteFixo())
+	apos, _, err := c.Debitar(deveID(t, transacaoA), deveParse(t, "100.00"), instanteFixo())
 	if err != nil {
 		t.Fatalf("Debitar: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestCredito(t *testing.T) {
 		t.Fatalf("Nova: %v", err)
 	}
 
-	apos, err := c.Creditar(deveID(t, transacaoA), deveParse(t, "25.00"), instanteFixo())
+	apos, _, err := c.Creditar(deveID(t, transacaoA), deveParse(t, "25.00"), instanteFixo())
 	if err != nil {
 		t.Fatalf("Creditar: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestCreditoEmCarteiraZerada(t *testing.T) {
 		t.Fatalf("Nova: %v", err)
 	}
 
-	apos, err := c.Creditar(deveID(t, transacaoA), deveParse(t, "10.00"), instanteFixo())
+	apos, _, err := c.Creditar(deveID(t, transacaoA), deveParse(t, "10.00"), instanteFixo())
 	if err != nil {
 		t.Fatalf("Creditar: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestCreditoAcimaDoLimiteDoTipoRecusa(t *testing.T) {
 		t.Fatalf("Parse do limite: %v", err)
 	}
 
-	if _, err := c.Creditar(deveID(t, transacaoA), limite, instanteFixo()); !errors.Is(err, money.ErrOverflow) {
+	if _, _, err := c.Creditar(deveID(t, transacaoA), limite, instanteFixo()); !errors.Is(err, money.ErrOverflow) {
 		t.Errorf("devolveu %v, esperado money.ErrOverflow", err)
 	}
 }
@@ -304,7 +304,7 @@ func TestCreditoComValorNegativoRecusa(t *testing.T) {
 		t.Fatalf("Nova: %v", err)
 	}
 
-	if _, err := c.Creditar(deveID(t, transacaoA), deveParse(t, "-25.00"), instanteFixo()); err == nil {
+	if _, _, err := c.Creditar(deveID(t, transacaoA), deveParse(t, "-25.00"), instanteFixo()); err == nil {
 		t.Fatal("Creditar aceitou valor negativo")
 	}
 }
@@ -317,10 +317,10 @@ func TestOperacaoComValorNaoInicializadoRecusa(t *testing.T) {
 
 	var naoInicializado money.Money
 
-	if _, err := c.Debitar(deveID(t, transacaoA), naoInicializado, instanteFixo()); err == nil {
+	if _, _, err := c.Debitar(deveID(t, transacaoA), naoInicializado, instanteFixo()); err == nil {
 		t.Error("Debitar aceitou valor nao inicializado")
 	}
-	if _, err := c.Creditar(deveID(t, transacaoA), naoInicializado, instanteFixo()); err == nil {
+	if _, _, err := c.Creditar(deveID(t, transacaoA), naoInicializado, instanteFixo()); err == nil {
 		t.Error("Creditar aceitou valor nao inicializado")
 	}
 }
@@ -336,10 +336,10 @@ func TestOperacaoEmMoedaIncompativelRecusa(t *testing.T) {
 		t.Fatalf("Parse em USD: %v", err)
 	}
 
-	if _, err := c.Debitar(deveID(t, transacaoA), dolar, instanteFixo()); !errors.Is(err, ErrMoedaDaCarteira) {
+	if _, _, err := c.Debitar(deveID(t, transacaoA), dolar, instanteFixo()); !errors.Is(err, ErrMoedaDaCarteira) {
 		t.Errorf("devolveu %v, esperado ErrMoedaDaCarteira", err)
 	}
-	if _, err := c.Creditar(deveID(t, transacaoA), dolar, instanteFixo()); !errors.Is(err, ErrMoedaDaCarteira) {
+	if _, _, err := c.Creditar(deveID(t, transacaoA), dolar, instanteFixo()); !errors.Is(err, ErrMoedaDaCarteira) {
 		t.Errorf("devolveu %v, esperado ErrMoedaDaCarteira", err)
 	}
 }
@@ -357,7 +357,7 @@ func TestOperacaoComIdentificadorInvalidoRecusa(t *testing.T) {
 
 	for nome, id := range invalidos {
 		t.Run(nome, func(t *testing.T) {
-			if _, err := c.Debitar(id, deveParse(t, "10.00"), instanteFixo()); err == nil {
+			if _, _, err := c.Debitar(id, deveParse(t, "10.00"), instanteFixo()); err == nil {
 				t.Fatal("operacao com identificador invalido foi aceita")
 			}
 		})

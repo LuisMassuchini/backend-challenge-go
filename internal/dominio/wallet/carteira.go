@@ -148,59 +148,77 @@ func (c Carteira) CriadaEm() time.Time { return c.criadaEm }
 // AtualizadaEm devolve o instante da ultima mudanca de saldo.
 func (c Carteira) AtualizadaEm() time.Time { return c.atualizadaEm }
 
-// Debitar desconta um valor da carteira.
+// Debitar desconta um valor da carteira e devolve o lancamento correspondente.
 //
-// O valor devolvido em caso de erro e a carteira de entrada, sem alteracao. Nao
-// e um detalhe: um caso de uso que erre a treatment do erro e persista o valor
-// devolvido assim mesmo gravaria um debito sem lancamento, que e exatamente o
-// tipo de movimentacao que o ledger existe para impedir.
-func (c Carteira) Debitar(transacao Identificador, valor money.Money, agora time.Time) (Carteira, error) {
+// O valor devolvido em caso de erro e a carteira de entrada, sem alteracao, e o
+// lancamento e o valor zero, que nao existe. Nao e um detalhe: um caso de uso que
+// erre o tratamento do erro e persista o resultado assim mesmo gravaria um debito
+// sem lancamento, que e exatamente o tipo de movimentacao que o ledger existe
+// para impedir -- e a reconciliacao so descobriria a divergencia depois que o
+// dinheiro ja tinha sido movimentado.
+func (c Carteira) Debitar(transacao Identificador, valor money.Money, agora time.Time) (Carteira, Lancamento, error) {
 	if err := c.validarOperacao(transacao, valor, agora); err != nil {
-		return c, err
+		return c, Lancamento{}, err
 	}
 	if !valor.IsPositive() {
-		return c, fmt.Errorf("%w: debito de %s", ErrValorInvalido, valor)
+		return c, Lancamento{}, fmt.Errorf("%w: debito de %s", ErrValorInvalido, valor)
 	}
 	if valor.Currency() != c.saldo.Currency() {
-		return c, fmt.Errorf("%w: debito em %s sobre carteira em %s", ErrMoedaDaCarteira, valor, c.saldo.Currency())
+		return c, Lancamento{}, fmt.Errorf("%w: debito em %s sobre carteira em %s", ErrMoedaDaCarteira, valor, c.saldo.Currency())
 	}
 
 	novoSaldo, err := c.saldo.Sub(valor)
 	if err != nil {
-		return c, fmt.Errorf("debito: %w", err)
+		return c, Lancamento{}, fmt.Errorf("debito: %w", err)
 	}
-	// saldo e o int64 em unidade minima, e a subtracao acima ja devolveu erro
-	// em caso de transbordo. A checagem abaixo cobre o outro lado: um debito que
-	// nao cabe no saldo, e que produziria saldo negativo.
+	// A subtracao acima ja devolveu erro em caso de transbordo. A checagem
+	// abaixo cobre o outro lado: um debito que cabe em int64 mas nao cabe no
+	// saldo, e que produziria saldo negativo.
 	if novoSaldo.IsNegative() {
-		return c, fmt.Errorf("%w: debito de %s sobre saldo de %s", ErrSaldoInsuficiente, valor, c.saldo)
+		return c, Lancamento{}, fmt.Errorf("%w: debito de %s sobre saldo de %s", ErrSaldoInsuficiente, valor, c.saldo)
 	}
 
-	return c.comSaldo(novoSaldo, agora), nil
+	lancamento, err := NovoLancamento(
+		NovoIdentificador(), c.id, transacao, DirecaoDebito,
+		valor, c.saldo, novoSaldo, agora,
+	)
+	if err != nil {
+		return c, Lancamento{}, fmt.Errorf("lancamento do debito: %w", err)
+	}
+
+	return c.comSaldo(novoSaldo, agora), lancamento, nil
 }
 
-// Creditar soma um valor na carteira.
+// Creditar soma um valor na carteira e devolve o lancamento correspondente.
 //
 // Credito de valor negativo e recusado. Ele seria um debito escrito de outro
 // jeito, e ter dois jeitos de mover dinheiro para o mesmo lado e o caminho mais
 // curto para um lancamento com direcao errada no ledger.
-func (c Carteira) Creditar(transacao Identificador, valor money.Money, agora time.Time) (Carteira, error) {
+func (c Carteira) Creditar(transacao Identificador, valor money.Money, agora time.Time) (Carteira, Lancamento, error) {
 	if err := c.validarOperacao(transacao, valor, agora); err != nil {
-		return c, err
+		return c, Lancamento{}, err
 	}
 	if !valor.IsPositive() {
-		return c, fmt.Errorf("%w: credito de %s", ErrValorInvalido, valor)
+		return c, Lancamento{}, fmt.Errorf("%w: credito de %s", ErrValorInvalido, valor)
 	}
 	if valor.Currency() != c.saldo.Currency() {
-		return c, fmt.Errorf("%w: credito em %s sobre carteira em %s", ErrMoedaDaCarteira, valor, c.saldo.Currency())
+		return c, Lancamento{}, fmt.Errorf("%w: credito em %s sobre carteira em %s", ErrMoedaDaCarteira, valor, c.saldo.Currency())
 	}
 
 	novoSaldo, err := c.saldo.Add(valor)
 	if err != nil {
-		return c, fmt.Errorf("credito: %w", err)
+		return c, Lancamento{}, fmt.Errorf("credito: %w", err)
 	}
 
-	return c.comSaldo(novoSaldo, agora), nil
+	lancamento, err := NovoLancamento(
+		NovoIdentificador(), c.id, transacao, DirecaoCredito,
+		valor, c.saldo, novoSaldo, agora,
+	)
+	if err != nil {
+		return c, Lancamento{}, fmt.Errorf("lancamento do credito: %w", err)
+	}
+
+	return c.comSaldo(novoSaldo, agora), lancamento, nil
 }
 
 // validarOperacao confere o que toda movimentacao precisa ter.
