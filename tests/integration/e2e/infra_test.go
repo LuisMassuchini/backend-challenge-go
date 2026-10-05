@@ -605,6 +605,29 @@ func centavosParse(valor string) (int64, error) {
 	return total, nil
 }
 
+// idDeIndice devolve um identificador estavel e unico por indice.
+//
+// O `playerId` tem de ser um UUID valido porque o dominio valida antes de gravar, e
+// um indice como texto seria recusado com "playerId invalido" -- e a falha pareceria
+// ser de concorrencia. O UUID vem do indice com um prefixo de namespace, de modo que
+// dois cenarios nunca colidam no mesmo banco.
+//
+// A funcao e pura e nao usa `uuid.NewString` porque dois testes que abrissem a mesma
+// carteira por acasobentrum flourishiam um no outro.
+func idDeIndice(indice int) string {
+	//nolint:errcheck
+	gerado := uuid.NewSHA1(namespaceE2E, []byte(fmt.Sprintf("indice-%d", indice)))
+	return gerado.String()
+}
+
+// namespaceE2E e o namespace dos identificadores gerados pelo pacote.
+//
+// Um UUID no namespace Fixo e o que garante que `idDeIndice(3)` seja sempre o mesmo
+// valor: um teste que abre a carteira do indice 3 em uma execucao e em outra precisa
+// ver a mesma carteira, senao a segunda execucao comecaria do zero sem o teste ter
+// mudado.
+var namespaceE2E = uuid.MustParse("6f8d1e2a-3b4c-4d5e-8f90-1a2b3c4d5e6f")
+
 // abs devolve o valor absoluto.
 func abs(v int64) int64 {
 	if v < 0 {
