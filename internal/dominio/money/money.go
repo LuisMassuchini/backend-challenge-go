@@ -195,12 +195,38 @@ func Parse(texto string, moeda Currency) (Money, error) {
 		unidadeMinima = inteiro + casas
 	}
 
-	amount, err := strconv.ParseInt(unidadeMinima, 10, 64)
+	// A magnitude e convertida em unsigned e o sinal e aplicado depois. Em
+	// int64, o menor valor do tipo nao seria alcancavel: parsear o numero
+	// absoluto ja falharia por transbordo, e o valor minimo do sistema
+	// ficaria fora do alcance do proprio contrato que o define.
+	magnitude, err := strconv.ParseUint(unidadeMinima, 10, 64)
 	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			return Money{}, fmt.Errorf("%w: %q fora do intervalo de int64 em unidade minima", ErrOverflow, texto)
+		}
 		return Money{}, fmt.Errorf("%w: %q", ErrFormatoInvalido, texto)
 	}
-	if negativo {
-		amount = -amount
+
+	// magnitudeMaxima e o maior valor absoluto aceito: o oposto do menor int64.
+	// Um digito a mais ja e overflow em qualquer dos dois sentidos.
+	const magnitudeMaxima = uint64(maxInt64) + 1
+	if magnitude > magnitudeMaxima {
+		return Money{}, fmt.Errorf("%w: %q fora do intervalo de int64 em unidade minima", ErrOverflow, texto)
+	}
+
+	var amount int64
+	switch {
+	case negativo && magnitude == magnitudeMaxima:
+		// Escrito como caso explicito porque converter uint64 para int64 aqui
+		// dependeria de comportamento definido como truncamento, e o menor
+		// valor do tipo nao pode depender de detalhe de implementacao.
+		amount = minInt64
+	case negativo:
+		amount = -int64(magnitude)
+	case magnitude == magnitudeMaxima:
+		return Money{}, fmt.Errorf("%w: %q fora do intervalo de int64 em unidade minima", ErrOverflow, texto)
+	default:
+		amount = int64(magnitude)
 	}
 
 	return Money{amount: amount, currency: moeda}, nil
@@ -290,6 +316,13 @@ func (m Money) Add(outro Money) (Money, error) {
 	if err := m.ValidarMoeda(outro); err != nil {
 		return Money{}, err
 	}
+	// A guarda e escrita com subtracao em vez de comparacao de soma porque e o
+	// unico jeito de detectar transbordo sem fazer a soma: "amount > 0" sozinho
+	// nao distingue 9223372036854775807 + 1 de 9223372036854775807 - 1.
+	if (outro.amount > 0 && m.amount > maxInt64-outro.amount) ||
+		(outro.amount < 0 && m.amount < minInt64-outro.amount) {
+		return Money{}, fmt.Errorf("%w: %s + %s", ErrOverflow, m, outro)
+	}
 	return Money{amount: m.amount + outro.amount, currency: m.currency}, nil
 }
 
@@ -301,6 +334,12 @@ func (m Money) Add(outro Money) (Money, error) {
 func (m Money) Sub(outro Money) (Money, error) {
 	if err := m.ValidarMoeda(outro); err != nil {
 		return Money{}, err
+	}
+	// Mesma razao da soma: o transbordo de Sub aparece quando o resultado e
+	// negativo e grande, e nao quando o resultado e positivo e grande.
+	if (outro.amount < 0 && m.amount > maxInt64+outro.amount) ||
+		(outro.amount > 0 && m.amount < minInt64+outro.amount) {
+		return Money{}, fmt.Errorf("%w: %s - %s", ErrOverflow, m, outro)
 	}
 	return Money{amount: m.amount - outro.amount, currency: m.currency}, nil
 }
