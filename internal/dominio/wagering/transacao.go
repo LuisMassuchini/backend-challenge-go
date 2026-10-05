@@ -368,6 +368,13 @@ func validarRegistro(r Registro) error {
 	if err := r.Valor.Validar(); err != nil {
 		return fmt.Errorf("valor: %w", err)
 	}
+	// A politica de zero por tipo entra aqui, e nao na borda HTTP nem no
+	// consumidor SQS. Aplicada nos dois caminhos de entrada, ela seria
+	// duplicada; aplicada so na borda, o dominio aceitaria uma transacao que
+	// nenhuma regra financeira consegue processar.
+	if err := validarPoliticaDeValor(r.Tipo, r.Valor); err != nil {
+		return err
+	}
 	if r.CriadaEm.IsZero() {
 		return fmt.Errorf("%w: instante de criacao ausente", ErrRegistroInvalido)
 	}

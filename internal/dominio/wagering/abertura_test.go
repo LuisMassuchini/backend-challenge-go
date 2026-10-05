@@ -72,6 +72,13 @@ func TestTiposExternosLegiveis(t *testing.T) {
 
 	for _, tipo := range legiveis {
 		t.Run(string(tipo), func(t *testing.T) {
+			// LOSS e o tipo invertido: exige zero. Aqui o que se testa e que o
+			// tipo chega a ser aceito como tipo, e nao a politica de valor, que
+			// tem suite propria.
+			valor := "25.00"
+			if tipo == TipoLOSS {
+				valor = "0.00"
+			}
 			registro := Registro{
 				Provedor:          Provedor(provedorA),
 				TransacaoExterna:  Externo(externoA),
@@ -82,7 +89,7 @@ func TestTiposExternosLegiveis(t *testing.T) {
 				Rodada:            Rodada(rodadaA),
 				Jogo:              Jogo(jogoA),
 				Tipo:              tipo,
-				Valor:             deveParse(t, "25.00"),
+				Valor:             deveParse(t, valor),
 				CriadaEm:          instanteFixo(),
 			}
 			if tipo.ExigeReferencia() {
