@@ -95,6 +95,23 @@ test-docker: ## Executa a suite dentro da imagem oficial do Go
 test-race-docker: ## Executa a suite com detector de corrida na imagem oficial do Go
 	MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR):/src" -w /src $(GO_IMAGE) go test -race ./...
 
+##@ Integracao
+
+# Os testes de integracao rodam contra o PostgreSQL do Compose, com a tag
+# `integration`. A tag existe para que `go test ./...` continue sendo um portao
+# lento e sem dependencia: quem so quer verificar codigo nao precisa de container.
+test-integration: ## Executa os testes de integracao contra o Postgres do Compose
+	$(GO) test -tags=integration -count=1 ./tests/integration/...
+
+migrations-up: ## Aplica as migrations pendentes
+	$(GO) run ./cmd/migrate up
+
+migrations-down: ## Reverte a ultima migration aplicada
+	$(GO) run ./cmd/migrate down
+
+migrations-status: ## Mostra o estado de cada migration
+	$(GO) run ./cmd/migrate status
+
 ##@ Execucao
 
 run: ## Sobe a aplicacao
