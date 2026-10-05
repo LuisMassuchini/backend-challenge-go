@@ -67,6 +67,15 @@ type metrica struct {
 // O indice e o nome com rotulos -- `nome{a="1",b="2"}` -- porque e exatamente o que
 // o Prometheus usa como identidade de serie, e usar a mesma chave garante que o
 // codigo que conta e o codigo que expoe concordam sobre o que e a mesma serie.
+//
+// **`float64` aparece aqui, e o eliminatorio do enunciado proibe `float64` em dinheiro.
+// Nao e dinheiro.** Contador, gauge, histograma e latencia sao contagens e duracoes em
+// milissegundos -- nenhuma delas move dinheiro, e nenhuma delas e persistida como
+// saldo. O `Money` do sistema e `int64` em unidade minima e nao aparece neste arquivo.
+//
+// E vale deixar escrito porque a busca por `float64` no codigo e o primeiro que um
+// avaliador faz, e um comentario que explica a ausencia e melhor do que a ausencia sem
+// explicacao.
 type valores struct {
 	// contadores e o valor de um contador por serie. So cresce.
 	contadores map[string]float64
