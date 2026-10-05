@@ -123,7 +123,7 @@ func recuperar(proximo http.Handler) http.Handler {
 		defer func() {
 			if motivo := recover(); motivo != nil {
 				// Um ResponseWriter ja utilizado nao pode ser reaproveitado: o
-				// cabecalho pode ter saído. Escrever 500 nesse estado adiciona
+				// cabecalho pode ter saido. Escrever 500 nesse estado adiciona
 				// bytes a uma resposta started, e o cliente ve JSON truncado em vez
 				// de um erro limpo.
 				slog.Error("panic no handler",

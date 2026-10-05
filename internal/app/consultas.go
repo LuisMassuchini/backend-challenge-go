@@ -17,7 +17,7 @@ type RequisicaoLedger struct {
 
 // LerCarteira devolve a carteira.
 //
-// A leitura nao exige escopo proprio: qualquer ator autenticado que alcança a rota
+// A leitura nao exige escopo proprio: qualquer ator autenticado que alcanca a rota
 // pode ver a carteira. O enunciado isola provedor por escopo de operacao, e nao
 // por escopo de leitura, entao acrescentar um escopo aqui seria inventar uma
 // restricao que o contrato nao pede.
