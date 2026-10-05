@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wallet"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/pg"
 )
 
@@ -125,6 +126,48 @@ type Servicos struct {
 	// Correlacao gera o identificador de correlacao de um comando quando a borda
 	// nao informou um.
 	Correlacao func() string
+	// Metricas mede os desfechos e as latencias.
+	//
+	// Entra em Servicos e nao como parametro de cada caso de uso porque medir e parte
+	// do que o caso de uso decide: quem sabe o desfecho e a duracao do commit e o
+	// mesmo codigo que decide. Nil desliga a medicao, e o que permite ao processo de
+	// migrations e ao teste de dominio rodarem sem registro.
+	Metricas *obs.Metricas
+}
+
+// registraDesfecho conta o desfecho de uma operacao.
+//
+// E metodo em `Servicos` e nao funcao solta porque todos os caminhos de desfecho
+// precisam contar, e um helper que cada um esquece de chamar e um helper que nao
+// conta. Com o metodo, o `nil` ja e a condicao de "nao medir", e nenhum caminho
+// precisa perguntar se o registro existe.
+func (s Servicos) registraDesfecho(estado string) {
+	if s.Metricas != nil {
+		s.Metricas.Operacoes.Inc("estado", estado)
+	}
+}
+
+// registraDuplicata conta um replay reconhecido pela idempotencia.
+//
+// Contar replay como operacao seria errado nas duas direcoes: o painel mostraria
+// mais operacoes do que aconteceram, e a duplicata -- que e o que precisa ser
+// visivel -- ficaria misturada com o caminho feliz.
+func (s Servicos) registraDuplicata(via string) {
+	if s.Metricas != nil {
+		s.Metricas.Duplicatas.Inc("via", via)
+	}
+}
+
+// registraConflitoLock conta uma transacao que perdeu a disputa pelo lock.
+//
+// E metodo em `Servicos` porque a traducao do erro de lock para o rotulo da metrica
+// e responsabilidade do caso de uso: o repositorio devolve o erro do driver, e quem
+// sabe o que aquele erro significa no contexto da carteira e o codigo que pediu a
+// operacao.
+func (s Servicos) registraConflitoLock(motivo string) {
+	if s.Metricas != nil {
+		s.Metricas.ConflitosLock.Inc("motivo", motivo)
+	}
 }
 
 // verifica confere que os servicos minimos existem.

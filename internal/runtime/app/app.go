@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/runtime/config"
 )
 
@@ -106,6 +107,8 @@ func New(cfg config.Config, eventos *Eventos) *app {
 		// processo ficaria sem publicacao. A ordem de parada e o inverso da de
 		// registro, e e ela que garante que o servidor HTTP para primeiro.
 		fx.Provide(
+			construirRegistro,
+			construireMetricas,
 			construirPool,
 			construirServicos,
 			construirValidador,
@@ -147,6 +150,16 @@ func New(cfg config.Config, eventos *Eventos) *app {
 	a.interno = fx.New(opcoes...)
 
 	return a
+}
+
+// construireMetricas declara o conjunto de metricas no registro.
+//
+// E um provider separado do registro porque as metricas nomeadas sao uma dependencia
+// de varios componentes -- caso de uso, relay e consumidor -- e um provider e o que
+// faz o Fx entregar a mesma instancia para todos. Declarar dentro de cada um daria
+// tres conjuntos com o mesmo nome e tres paineis que nao batem.
+func construireMetricas(registro *obs.Registro) *obs.Metricas {
+	return obs.NovasMetricas(registro)
 }
 
 // ligarGrafo existe so para forcar a construcao do grafo.

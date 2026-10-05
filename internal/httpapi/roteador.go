@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/LuisMassuchini/backend-challenge-go/internal/app"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 )
 
 // ValidadorDeToken e o que o middleware precisa saber para autenticar.
@@ -34,6 +35,14 @@ type Dependencias struct {
 
 	// Pronto e o que o health check de readiness consulta. Nil significa pronto.
 	Pronto func(context.Context) error
+
+	// Metricas expoe as metricas do processo. Nil significa que o processo sobe sem
+	// registro, que e o estado de quem so precisa atender.
+	//
+	// Nil e nao um registro vazio de proposito: `GET /metrics` sem registro
+	// responderia 200 com um corpo vazio, e quem scrapeia leria "nenhuma metrica" --
+	// que e indistinguivel de "o processo esqueceu de medir".
+	Metricas *obs.Registro
 }
 
 // NovoServidor monta o servidor e as rotas.
@@ -64,6 +73,20 @@ func NovoRoteador(d Dependencias) http.Handler {
 	rotas.HandleFunc("GET /health/live", live)
 	rotas.HandleFunc("GET /health/ready", ready(d))
 
+	// `/metrics` e publico pelo mesmo motivo dos health checks: quem scrapeia e o
+	// Prometheus, que opera com credencial propria e nao tem token do Keycloak.
+	//
+	// O que torna isso aceitavel e o que a metrica recusa ser: nenhum identificador
+	// de carteira, jogador, provedor ou transacao vira rotulo. As series sao de
+	// estado e de tipo, conjuntos fechados, e o que o endpoint revela e volume de
+	// operacao -- nao dado de cliente.
+	//
+	// Ver `obs.nomesDeRotuloProibidos`, que e a lista que torna a promessa verificavel
+	// em vez de apenas afirmada.
+	if d.Metricas != nil {
+		rotas.HandleFunc("GET /metrics", metricas(d.Metricas))
+	}
+
 	// As rotas de negocio ficam sob o grupo que exige token. A autorizacao por
 	// escopo e do caso de uso, nao do roteador: o roteador diz quem e o ator, e o
 	// caso de uso diz o que aquele ator pode fazer.
@@ -82,6 +105,23 @@ func NovoRoteador(d Dependencias) http.Handler {
 	}
 
 	return comMiddlewares(rotas)
+}
+
+// metricas expoe as metricas no formato de texto do Prometheus.
+//
+// O tipo de conteudo e o que o Prometheus espera. Sem ele, o scrape funciona e o
+// painel mostra a serie como texto, o que parece funcionar em uma consulta manual e
+// falha em producao.
+func metricas(registro *obs.Registro) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+
+		// O erro de escrita aqui nao pode ser tratado: a resposta ja foi iniciada e
+		// nao ha canal para corrigir.
+		//nolint:errcheck
+		_, _ = w.Write([]byte(registro.Expor()))
+	}
 }
 
 // live responde que o processo esta vivo.

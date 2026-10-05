@@ -10,6 +10,7 @@ import (
 
 	casos "github.com/LuisMassuchini/backend-challenge-go/internal/app"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/consumidor"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/runtime/config"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/sqs"
 )
@@ -85,7 +86,11 @@ func construirFila(cfg config.Config) (FilaDeOperacoes, error) {
 }
 
 // construirConsumidor monta o worker da fila.
-func construirConsumidor(fila FilaDeOperacoes, servicos casos.Servicos) ConsumidorDeOperacoes {
+func construirConsumidor(
+	fila FilaDeOperacoes,
+	servicos casos.Servicos,
+	metricas *obs.Metricas,
+) ConsumidorDeOperacoes {
 	if !fila.Ativa() {
 		return ConsumidorDeOperacoes{}
 	}
@@ -97,6 +102,7 @@ func construirConsumidor(fila FilaDeOperacoes, servicos casos.Servicos) Consumid
 			Lote:               10,
 			Ocioso:             500 * time.Millisecond,
 			RenovaVisibilidade: 20 * time.Second,
+			Metricas:           metricas,
 		}),
 	}
 }

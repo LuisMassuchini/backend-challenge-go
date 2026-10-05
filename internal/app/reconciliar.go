@@ -6,6 +6,7 @@ import (
 
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/money"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wallet"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/pg"
 )
 
@@ -104,6 +105,24 @@ func Reconciliar(ctx context.Context, s Servicos, ator Ator, req RequisicaoRecon
 	})
 	if err != nil {
 		return RespostaReconciliacao{}, err
+	}
+
+	// A divergencia vai para o log como erro, e o enunciado pede isso: ela aparece na
+	// resposta, no log e em uma metrica. Sem a linha de log, uma carteira corrompida
+	// por fora do processo so apareceria para quem Lembrasse de rodar a reconciliacao.
+	//
+	// A diferenca entra como numero de centavos e nao como `Money`: o log nao carrega
+	// valor monetario formatado, e o par de unidades minimas e o que o alerta precisa
+	// para classificar a gravidade sem obriga quem le a converter.
+	if resposta.Divergente {
+		s.Metricas.ObservaDivergencia()
+		obs.Log(obs.De(ctx).ComCarteira(resposta.Carteira.ID().String())).
+			Error("saldo da carteira diverge do ledger",
+				"centavos_gravado", resposta.SaldoGravado.Amount(),
+				"centavos_ledger", resposta.SaldoDoLedger.Amount(),
+				"lancamentos", resposta.Lancamentos,
+				"moeda", string(resposta.SaldoGravado.Currency()),
+			)
 	}
 
 	return resposta, nil

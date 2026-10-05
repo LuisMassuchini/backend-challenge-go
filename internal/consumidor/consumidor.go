@@ -17,6 +17,7 @@ import (
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wagering"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wallet"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/fingerprint"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/sqs"
 )
 
@@ -26,6 +27,20 @@ import (
 // mesmo consumidor usassem nomes diferentes, cada uma teria sua propria linha e a
 // segunda nao reconheceria a entrega da primeira.
 const nomeDoConsumidor = "wager-service"
+
+// tentativasDaFilaMorta e a partir de qual recebimento a mensagem vai para o cartao
+// morto.
+//
+// O valor espelha o `MAX_RECEIVE` de `deploy/localstack/init/00-filas.sh`, e ele esta
+// aqui duplicado de proposito, nao por esquecimento: o `receive count` da fila e a
+// unica fonte que o consumidor tem, e o valor nao vem na mensagem. A duplicia e o
+// preco de nao ter o parametro da fila na borda, e a alternativa seria expor a
+// politica de redrive no codigo e no script -- dois lugares para mudar quando a
+// politica mudar.
+//
+// O sintoma de a duplicia ficar errada e uma metrica de fila morta que conta na
+// margem: nem zero quando deveria contar, nem o valor da fila quando nao devia.
+const tentativasDaFilaMorta = 3
 
 // MensagemOperacao e o corpo da mensagem da fila.
 //
@@ -118,6 +133,9 @@ type Worker struct {
 	// processamento e renovada.
 	renovaVisibilidade time.Duration
 
+	// metricas conta retentativa e fila morta, quando ha registro.
+	metricas *obs.Metricas
+
 	// limiteDeVisibilidade e por quanto tempo a visibilidade e estendida quando
 	// o processamento passa do intervalo de renovacao.
 	limiteDeVisibilidade time.Duration
@@ -139,6 +157,12 @@ type Dependencias struct {
 
 	// RenovaVisibilidade e o intervalo de renovacao da visibilidade.
 	RenovaVisibilidade time.Duration
+
+	// Metricas conta retentativa e fila morta.
+	//
+	// Nil desliga a contagem. E o que permite ao consumidor ser montado em teste sem
+	// registro.
+	Metricas *obs.Metricas
 }
 
 // Novo monta o worker.
@@ -159,6 +183,7 @@ func Novo(d Dependencias) *Worker {
 		ocioso:               ocioso,
 		renovaVisibilidade:   renova,
 		limiteDeVisibilidade: 60 * time.Second,
+		metricas:             d.Metricas,
 	}
 }
 
@@ -191,7 +216,7 @@ func (w *Worker) Rodar(ctx context.Context) error {
 			// Falha de recebimento e problema de infraestrutura, e nao da mensagem.
 			// Voltar a tentar imediatamente transformaria uma fila fora em um laco
 			// apertado de log.
-			slog.Error("falha ao receber mensagens", "erro", err.Error())
+			obs.Log(obs.De(ctx)).Error("falha ao receber mensagens", obs.ErroCom(err))
 			if !dormir(ctx, w.ocioso) {
 				return nil
 			}
@@ -246,10 +271,8 @@ func (w *Worker) tratar(ctx context.Context, mensagem sqs.Mensagem) bool {
 					// Falha ao renovar nao invalida o processamento em andamento: a
 					// transacao do banco ainda garante que o dinheiro nao se move duas
 					// vezes. Vale o log, e nao o abandono.
-					slog.Warn("nao foi possivel renovar a visibilidade",
-						"mensagem", mensagem.ID,
-						"erro", err.Error(),
-					)
+					obs.Log(obs.De(ctx).ComMensagem(mensagem.ID)).
+						Warn("nao foi possivel renovar a visibilidade", obs.ErroCom(err))
 				}
 			}
 		}
@@ -260,13 +283,30 @@ func (w *Worker) tratar(ctx context.Context, mensagem sqs.Mensagem) bool {
 		// Mensagem malformada nao melhora com repeticao: o produtor mandou algo que
 		// este servico nao entende, e reentregar seria repetir o erro um numero
 		// limitado de vezes ate a fila morta, sem chance de sucesso.
-		slog.Error("mensagem descartada por ser invalida",
-			"mensagem", mensagem.ID,
-			"tentativas", mensagem.Tentativas,
-			"erro", err.Error(),
-		)
+		//
+		// A linha leva o identificador da mensagem e nao o do produtor: e o que o
+		// operador tem para achar a mensagem exata na fila, que e o unico lugar onde
+		// ela ainda existe.
+		obs.Log(obs.De(ctx).ComMensagem(mensagem.ID)).
+			Error("mensagem descartada por ser invalida",
+				"tentativas", mensagem.Tentativas,
+				obs.ErroCom(err),
+			)
 		return w.apagar(ctx, mensagem)
 	}
+
+	// O Contexto de log viaja do worker para o caso de uso. E o que amarra a linha da
+	// operacao a linha da entrega: quem tem o messageId acha a operacao, e quem tem a
+	// correlacao acha a entrega.
+	//
+	// A chave de idempotencia entra como correlacao quando o produtor nao mandou
+	// nenhuma, porque a chave e o unico identificador estavel que existe antes do
+	// caso de uso devolver o `transactionId`.
+	registro := obs.De(ctx).
+		ComMensagem(mensagem.ID).
+		ComProvedor(string(comando.Provedor)).
+		ComCarteira(comando.Carteira.String()).
+		ComCorrelacao(observavelCorrelacao(comando))
 
 	// O ator do consumidor e o provedor da propria mensagem. A autorizacao nao e
 	// conferida aqui de novo: o produtor ja nao tem como escolher outro provedor,
@@ -277,37 +317,69 @@ func (w *Worker) tratar(ctx context.Context, mensagem sqs.Mensagem) bool {
 		Escopos:  []string{app.EscopoOperacoes},
 	}
 
-	_, err = app.ProcessarOperacao(ctx, w.servicos, ator, comando)
+	resposta, err := app.ProcessarOperacao(registro.Anulado(), w.servicos, ator, comando)
 	switch {
 	case err == nil:
+		obs.Log(registro.ComTransacao(resposta.TransacaoID.String())).
+			Info("operacao concluida pela fila",
+				"estado", string(resposta.Estado),
+				"replay", resposta.Replay,
+				obs.Duracao("duracao_ms", time.Since(inicio).Milliseconds()),
+			)
 		// Sucesso e recusa de regra contam como sucesso da mensagem: a operacao foi
 		// concluida e registrada, e a resposta esta no banco e nos eventos. Reentregar
 		// uma recusa de saldo so faria o provedor esperar mais uma vez.
 		return w.apagar(ctx, mensagem)
 
 	case ErroDeMensagem(err):
-		slog.Error("mensagem descartada", "mensagem", mensagem.ID, "erro", err.Error())
+		obs.Log(registro).Error("mensagem descartada", obs.ErroCom(err))
 		return w.apagar(ctx, mensagem)
 
 	default:
 		// Falha de infraestrutura: a mensagem volta. A idempotencia garante que a
 		// reentrega nao mova dinheiro de novo, e o limite de tentativas da fila leva
 		// o que sempre falha para o cartao morto.
-		slog.Error("operacao falhou, mensagem sera reentregue",
-			"mensagem", mensagem.ID,
-			"chave", comando.Chave,
-			"tentativas", mensagem.Tentativas,
-			"duracao_ms", time.Since(inicio).Milliseconds(),
-			"erro", err.Error(),
-		)
+		//
+		// A contagem distingue os dois destinos: enquanto `tentativas` estiver abaixo
+		// do maximo da fila, a mensagem vai voltar; quando passar, ela foi para o
+		// cartao morto. Um contador so de retentativa esconderia o segundo caso, que e
+		// o que o operador precisa para ir ver o cartao morto.
+		if w.metricas != nil {
+			if mensagem.Tentativas >= tentativasDaFilaMorta {
+				w.metricas.MensagensFilaMorta.Inc("fila", "operacoes")
+			} else {
+				w.metricas.Retentativas.Inc("origem", "operacoes")
+			}
+		}
+
+		obs.Log(registro).
+			Error("operacao falhou, mensagem sera reentregue",
+				"tentativas", mensagem.Tentativas,
+				obs.Duracao("duracao_ms", time.Since(inicio).Milliseconds()),
+				obs.ErroCom(err),
+			)
 		return true
 	}
+}
+
+// observavelCorrelacao devolve a correlacao do comando.
+//
+// A chave de idempotencia e o fallback, e nao um valor inventado: e o identificador
+// que o produtor pode citar no chamado, e ele ja existia antes de qualquer codigo
+// daqui rodar. Um UUID novo seria um identificador que ninguem, nem o operador nem o
+// produtor, consegue usar para chegar no log.
+func observavelCorrelacao(comando app.RequisicaoOperacao) string {
+	if comando.Correlacao != "" {
+		return comando.Correlacao
+	}
+	return string(comando.Chave)
 }
 
 // apagar remove a mensagem da fila.
 func (w *Worker) apagar(ctx context.Context, mensagem sqs.Mensagem) bool {
 	if err := w.fila.Concluir(ctx, mensagem.ReceiptHandle); err != nil {
-		slog.Error("nao foi possivel apagar a mensagem", "mensagem", mensagem.ID, "erro", err.Error())
+		obs.Log(obs.De(ctx).ComMensagem(mensagem.ID)).
+			Error("nao foi possivel apagar a mensagem", obs.ErroCom(err))
 		// Devolver true porque a falha e de infraestrutura: a mensagem volta e sera
 		// reprocessada, e o idempotencia devolve o resultado sem mover dinheiro.
 		return true

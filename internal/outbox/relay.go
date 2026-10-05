@@ -22,6 +22,7 @@ import (
 
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/eventos"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/dominio/wallet"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/pg"
 )
 
@@ -75,6 +76,13 @@ type Dependencias struct {
 	// Relogio e a fonte do instante corrente.
 	Relogio Relogio
 
+	// Metricas mede o que o relay publica.
+	//
+	// Nil desliga a medicao. E o que permite ao relay ser montado em teste sem
+	// registro, e o que faz `GET /metrics` responder honestamente quando o processo
+	// nao tem o que medir.
+	Metricas *obs.Metricas
+
 	// Lote e quantos registros sao reservados por ciclo.
 	Lote int
 
@@ -108,6 +116,8 @@ type Relay struct {
 	janela           time.Duration
 	backoff          time.Duration
 	maximoTentativas int
+	// metricas mede o que o relay publica, quando ha registro.
+	metricas *obs.Metricas
 }
 
 // valoresPadrao do relay.
@@ -189,6 +199,7 @@ func Novo(d Dependencias) (*Relay, error) {
 		janela:           janela,
 		backoff:          backoff,
 		maximoTentativas: tentativas,
+		metricas:         d.Metricas,
 	}, nil
 }
 
@@ -224,7 +235,7 @@ func (r *Relay) Rodar(ctx context.Context) error {
 			}
 			// Falha de infraestrutura no laco. Voltar a tentar imediatamente
 			// transformaria o banco fora em laco apertado de log.
-			slog.Error("falha no ciclo do relay", "erro", err.Error())
+			obs.Log(obs.De(ctx)).Error("falha no ciclo do relay", obs.ErroCom(err))
 			if !dormir(ctx, r.ocioso) {
 				return nil
 			}
@@ -317,7 +328,18 @@ func (r *Relay) tratar(ctx context.Context, registro pg.RegistroPendente) error 
 
 	// A confirmacao e DEPOIS da publicacao. Confirmar antes seria o caminho para
 	// perder o evento: o registro sairia da fila sem nunca ter chegado a ninguem.
-	return r.confirmar(ctx, evento)
+	if err := r.confirmar(ctx, registro.Evento); err != nil {
+		return err
+	}
+
+	// O atraso e medido do `OcorreuEm` -- o instante do fato -- ate a confirmacao. E o
+	// intervalo que responde "quanto tempo um evento levou para sair do sistema", e
+	// medir a partir da escrita do registro daria sempre proximo de zero.
+	if r.metricas != nil {
+		r.metricas.EventosPublicados.Inc("tipo", string(evento.Tipo()))
+		r.metricas.DefineAtrasoOutbox(evento.OcorreuEm(), r.relogio.Agora())
+	}
+	return nil
 }
 
 // confirmar marca o registro como publicado.
@@ -325,6 +347,23 @@ func (r *Relay) confirmar(ctx context.Context, evento eventos.Evento) error {
 	return r.unidade.Executar(ctx, func(q pg.Querente) error {
 		return r.outbox.ConfirmarPublicacao(ctx, q, evento.EventID(), r.relogio.Agora())
 	})
+}
+
+// registroDe monta o Contexto de log de um registro reservado.
+//
+// A correlacao vem do proprio evento, e nao do contexto do relay: o relay roda em
+// laco e nao tem uma requisicao para correlacionar. O `correlationId` do envelope e o
+// que amarra a falha de publicacao a operacao que a produziu, e ele sobrevive no
+// registro porque o payload da outbox e um snapshot imutavel.
+func (r *Relay) registroDe(registro pg.RegistroPendente) obs.Contexto {
+	contexto := obs.De(context.Background()).
+		ComEvento(registro.Evento.EventID().String()).
+		ComCorrelacao(registro.Evento.Correlacao())
+
+	if registro.Evento.AggregateID().Valida() {
+		contexto = contexto.ComTransacao(registro.Evento.AggregateID().String())
+	}
+	return contexto
 }
 
 // reprogramar devolve o registro para a fila com backoff, ou desiste.
@@ -335,13 +374,15 @@ func (r *Relay) reprogramar(ctx context.Context, registro pg.RegistroPendente, c
 
 	proximaEm := r.relogio.Agora().Add(r.backoff * pow2(registro.Tentativas))
 
-	slog.Warn("falha ao publicar evento, sera republicado",
-		"evento", registro.Evento.EventID().String(),
+	// O log leva o `eventId` e o agregado, e nao a chave de idempotencia da operacao.
+	// O relay nao conhece a operacao: ele conhece o evento, e o evento tem o
+	// `correlationId` dentro do proprio payload. Quem pesquisa pelo identificador que
+	// o provedor tem acha a linha da falha da publicacao.
+	obs.Log(r.registroDe(registro)).Warn("falha ao publicar evento, sera republicado",
 		"tipo", string(registro.Evento.Tipo()),
-		"agregado", registro.Evento.AggregateID().String(),
 		"tentativas", registro.Tentativas+1,
 		"proxima_em", proximaEm.Format(time.RFC3339),
-		"erro", causa.Error(),
+		obs.ErroCom(causa),
 	)
 
 	if err := r.unidade.Executar(ctx, func(q pg.Querente) error {
@@ -358,15 +399,17 @@ func (r *Relay) reprogramar(ctx context.Context, registro pg.RegistroPendente, c
 // e nao foi publicado, e o papel de runtime nem tem DELETE. O que fica e o motivo
 // gravado, que e o que o operador precisa para decidir.
 func (r *Relay) desistir(ctx context.Context, id wallet.Identificador, causa error) error {
-	slog.Error("evento nao pode ser publicado, desistindo",
-		"evento", id.String(),
-		"erro", causa.Error(),
-	)
+	obs.Log(obs.De(ctx).ComEvento(id.String())).
+		Error("evento nao pode ser publicado, desistindo", obs.ErroCom(causa))
 
 	if err := r.unidade.Executar(ctx, func(q pg.Querente) error {
 		return r.outbox.Desistir(ctx, q, id, causa.Error(), r.relogio.Agora())
 	}); err != nil {
 		return err
+	}
+
+	if r.metricas != nil {
+		r.metricas.EventosDesistidos.Inc("tipo", id.String())
 	}
 	return nil
 }
