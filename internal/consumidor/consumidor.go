@@ -123,7 +123,7 @@ func ErroDeMensagem(err error) bool {
 // concreto nao ha como escrever esse teste. A janela entre o commit, em
 // `internal/pg/unidade.go`, e o `DeleteMessage`, aqui em `apagar`, tem poucas linhas de
 // log no meio -- e matar o processo nesse instante e loteria. Com a interface, o teste
-// injeta a falha exatamente onde ela acontece, e o estado durável que sobra e o mesmo:
+// injeta a falha exatamente onde ela acontece, e o estado duravel que sobra e o mesmo:
 // commit confirmado, mensagem presente na fila.
 //
 // Os quatro metodos sao os que o worker chama. `URL` entra porque o log de partida
