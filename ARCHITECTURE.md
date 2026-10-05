@@ -470,6 +470,44 @@ preserva o `eventId`.
 entre o commit e o `delete` resulta em reentrega, e a inbox transforma a reentrega
 em replay do resultado persistido.
 
+**Como esse intervalo e testado.** O worker depende de uma interface `Fila`, com os
+quatro metodos que ele chama, e nao do cliente SQS concreto -- o mesmo desenho de
+`outbox.Publicador`. A razao e o cenario 5 do enunciado: a janela entre o commit e o
+`DeleteMessage` tem poucas linhas de log e metrica no meio, e matar o processo nesse
+instante e loteria. Com a interface, o teste injeta a falha exatamente onde ela
+acontece, e o estado duravel que sobra e o mesmo do crash: commit confirmado, mensagem
+presente na fila.
+
+O teste vai um passo alem de injetar falha e deixar o mesmo worker reentregar: ele para
+a instancia que falhou e prova que **outra** assume. Sem parar a primeira, ela
+reentregaria a mensagem ela mesma aos 60s, e o teste passaria sem provar que outra
+instancia consegue retomar.
+
+O que a garantia **nao** depende: o estado e duravel, e tanto a inbox quanto a chave de
+idempotencia sao indifferentemente a qual processo checou a mensagem. O teste e nomeado
+pelo estado que simula, e nao por "derruba o processo", porque ele nao derruba processo
+nenhum -- e essa distincao esta escrita no teste para ninguem ler e achar que ha um
+`kill` ali.
+
+**A inbox tem duas colunas porque sao duas perguntas.** `received_at` diz que a mensagem
+chegou; `completed_at` diz que ela produziu efeito. Sem a segunda, as duas viram a mesma
+coisa e a inbox deixa de distinguir trabalho concluido de trabalho orfao.
+
+Por muito tempo o `INSERT` acontecia e o `UPDATE` nao -- `completed_at` ficava sempre nulo,
+e nenhuma suite reclamava porque a garantia de dinheiro vem da chave de idempotencia, nao
+dessa coluna. O que faltava era uma garantia que o enunciado pede ("o registro da inbox **e
+a conclusao duravel** do tratamento devem compartilhar a transacao SQL") e uma
+distincao que o operador precisa. A E20 fechou as duas, e o texto esta em
+`docs/auditoria.md`, secao 6.2.
+
+**A coluna `attempts` da inbox esta morta, e isso e uma decisao pendente.** O schema
+documenta "conta as reentregas", e `Registrar` usa `ON CONFLICT DO NOTHING` sem nunca
+incrementar. Ela precisa de semantica que o codigo ainda nao tem -- incrementar so no
+conflito exige um `UPDATE` separado, e incrementar em toda entrega muda o significado da
+coluna. E o dado ja existe em outro lugar: o `ApproximateReceiveCount` da propria fila.
+**Enquanto ela estiver morta, ninguem deve le-la** para decidir se uma mensagem precisa de
+reprocessamento: ela diz que houve uma entrega quando houve duas.
+
 **Disputa por registros da outbox:** `FOR UPDATE SKIP LOCKED`, com lease e
 `next_attempt_at` para backoff. `SKIP LOCKED` permite varios publishers sem que um
 espero o outro, e e o que permite recuperar trabalho abandonado depois de uma

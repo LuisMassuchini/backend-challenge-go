@@ -7,8 +7,9 @@ Ele nao e um resumo do que ja foi feito. E a lista do que **falta**, com a mesma
 pergunta que um avaliador faz: "onde esta a prova?" -- e, quando a prova nao esta,
 "por que nao esta?".
 
-**Estado na auditoria:** 45 commits ate a E18, `make verify` e `make test-race-docker`
-verdes, treze pacotes de integracao verdes, dezesseis cenarios de E2E.
+**Estado na auditoria:** 49 commits ate a E20, `make verify` e `make test-race-docker`
+verdes, treze pacotes de integracao verdes, dezesseis cenarios de E2E e dez de consumidor
+contra a fila real.
 
 ---
 
@@ -18,20 +19,36 @@ verdes, treze pacotes de integracao verdes, dezesseis cenarios de E2E.
 |---|---:|---:|
 | Eliminatorios cumpridos | 10 de 10 | 10 de 10 |
 | Cenarios do enunciado | 10 de 12 | **12 de 12** |
-| Defeitos reais encontrados | -- | **1** |
-| Criterios com evidencia integral | 6 de 8 | 6 de 8 |
+| Defeitos reais encontrados | -- | **3** |
+| Criterios com evidencia integral | 6 de 8 | **8 de 8** |
 
-**O defeito encontrado e grave, e so apareceu com reversao em processo real.** A
-migration 00005 proibia nota de falha de retomada em `PROCESSED`, com o argumento de que
-uma operacao bem-sucedida nao deveria exibir erro de retomada. O argumento estava errado:
-a nota conta o caminho, e uma pendencia **retomada com sucesso** chega a `PROCESSED` com
-a nota das tentativas anteriores. A constraint recusava o `UPDATE`, o worker repetia, a
-constraint repetia, e a pendencia **nunca saia de `PENDING_REFERENCE`** mesmo com a
-referencia resolvida.
+**Os tres defeitos, e o que eles tinham em comum.**
 
-O estorno ficava travado sem que nenhum dinheiro se movesse errado -- o pior tipo de
-defeito, porque a garantia financeira continua valendo e a operacao simplesmente nunca
-termina. Detalhado na secao 6.
+O **primeiro** so apareceu com reversao em processo real. A migration 00005 proibia nota de
+falha de retomada em `PROCESSED`, com o argumento de que uma operacao bem-sucedida nao
+deveria exibir erro de retomada. O argumento estava errado: a nota conta o caminho, e uma
+pendencia **retomada com sucesso** chega a `PROCESSED` com a nota das tentativas
+anteriores. O `ROLLBACK` ficava travado em `PENDING_REFERENCE` para sempre, mesmo com a
+referencia resolvida. Secao 6.1.
+
+O **segundo** e mais silencioso. `Inbox.Concluir` nunca era chamado em producao, entao
+`completed_at` ficava sempre nulo: a inbox nao distinguia "tratado" de "o processo morreu
+no meio". O dinheiro nunca esteve errado -- a idempotencia nao depende dessa coluna -- mas
+faltava uma garantia que o enunciado pede explicitamente. Secao 6.2.
+
+O **terceiro** nao e bug, e uma decisao que ninguem tomou: a coluna `attempts` da inbox
+documenta "conta as reentregas" e nunca e incrementada. Secao 6.3.
+
+**O que eles tem em comum:** os tres estavam em lugares que **ninguem testava**. A
+constraint nova nunca exercitou o caminho da retomada com sucesso. O `UPDATE` da inbox
+nunca foi chamado, so o `INSERT`. A coluna `attempts` nao tem writer nem reader. **Nenhum
+dos tres apareceria em revisao de codigo, e os tres apareceram assim que alguem olhou o
+estado depois de um caminho feliz.**
+
+O padrao que a auditoria registra: um teste que verifica o **estado** depois do caminho
+feliz encontra defeitos que um teste que verifica o **resultado** nao encontra. O saldo
+estava certo em todos os casos; o que nao existia era a distincao entre "tratado" e
+"orfao".
 
 ---
 
@@ -82,7 +99,7 @@ trade-off.
 | Integridade financeira | 20 | `Money` exato, constraints no banco, reconciliacao com divergencia detectada, `LOSS` sem efeito, reversoes com politica | **nenhuma relevante** |
 | Concorrencia | 20 | 80/80 em tres processos, 50 replicas, carteiras em paralelo, reversao retomada por outra instancia, `lock_timeout` do papel de runtime | **nenhuma relevante** |
 | Idempotencia | 15 | dois indices, fingerprint canonico, resultado persistido, inbox com efeito real | **nenhuma relevante** |
-| Mensageria e recuperacao | 15 | inbox, outbox, relay com lease, dois publishers, reentrega, reencontro | **falta o crash entre commit e remocao da mensagem SQS** |
+| Mensageria e recuperacao | 15 | inbox, outbox, relay com lease, dois publishers, reentrega depois do commit, reencontro | **nenhuma relevante** |
 | Modelagem e arquitetura | 10 | `ARCHITECTURE.md` com decisao e custo, Fx com injecao por construtores, `Actor` na borda | **`fx.Module` nao foi usado: ver 5.3** |
 | Testes | 10 | tres processos, `-race` verde, auth real, treze pacotes de integracao, 16 cenarios de E2E | **nenhuma relevante** |
 | Observabilidade | 5 | logs JSON correlacionados, 12 metricas, `/metrics` publico, health checks | **nenhuma relevante** |
@@ -92,9 +109,8 @@ trade-off.
 
 ## 3. Os doze cenarios obrigatorios
 
-**Doze de doze cobertos** depois desta etapa. O item 5 segue sem teste dedicado, e o
-motivo esta em 5.1 -- mas o comportamento que ele protege tem evidencia indireta em
-`TestReencontroDevolveOResultadoPersistidoAposReinicio` e em `consumidorteste`.
+**Doze de doze cobertos, cada um com teste dedicado que o executa.** O item 5 -- a
+reentrega depois do commit -- foi o ultimo a fechar, na E20, e ver 5.1.
 
 | # | Cenario | Teste |
 |---:|---|---|
@@ -102,7 +118,8 @@ motivo esta em 5.1 -- mas o comportamento que ele protege tem evidencia indireta
 | 2 | duas apostas de 80.00 sobre 100.00 | `e2e.TestDisputaDeDuasApostasDeOitentaSobreSaldoCemEmTresInstancias` |
 | 3 | carteiras diferentes em paralelo | `e2e.TestCarteirasDistintasProcessamEmParalelo` |
 | 4 | HTTP e SQS para a mesma operacao | `e2e.TestMesmaOperacaoPorHTTPESQSAplicaUmaVez` e o inverso |
-| 5 | commit confirmado e processo interrompido antes do delete da mensagem | **AUSENTE** -- ver 5.1 || 6 | dois publishers disputando a mesma outbox | `e2e.TestDoisRelaysDisputandoNaoPublicamODuplicado` |
+| 5 | commit confirmado e processo interrompido antes do delete da mensagem | `consumidorteste.TestMensagemComApagamentoFalhoEReentregadaSemMoverDinheiroDuasVezes` |
+| 6 | dois publishers disputando a mesma outbox | `e2e.TestDoisRelaysDisputandoNaoPublicamODuplicado` |
 | 7 | `REFUND` antes da `BET` | `e2e.TestReversaoAntesDaApostaAssumidaPorOutraInstancia` |
 | 8 | `ROLLBACK` antes da referencia | `e2e.TestReversaoAntesDaApostaAssumidaPorOutraInstancia` + `casos.TestReversaoAntesDaApostaFicaPendente` |
 | 9 | restart com idempotencia preservada | `e2e.TestReencontroDevolveOResultadoPersistidoAposReinicio` |
@@ -134,25 +151,40 @@ Oito numeradas. Todas verificadas.
 Ordenadas por custo. As duas primeiras sao lacunas de **criterio com pontos**; as duas
 ultimas sao de **documentacao**.
 
-### 5.1 Falta o crash entre o commit e a remocao da mensagem SQS (criterio Mensageria, 15 pontos)
+### 5.1 ~~Falta o crash entre commit e remocao~~ **FECHADO NESTA ETAPA (E20)**
 
 O enunciado pede: "interrompa um consumidor depois do commit e antes da remocao da
-mensagem; valide a reentrega".
+mensagem; validate a reentrega".
 
-**O que existe:** `e2e.TestReencontroDevolveOResultadoPersistidoAposReinicio` faz o
-caminho pelo HTTP. A reentrega pelo SQS existe em `consumidorteste`.
+**Por que estava em aberto.** O `Stop` gracioso cancela o contexto e **espera** o
+goroutine terminar (`internal/runtime/app/consumidor.go`), e `tratar` ainda sai cedo
+quando o contexto ja acabou. A janela real entre o commit (`internal/pg/unidade.go:204`)
+e o `DeleteMessage` (`internal/consumidor/consumidor.go`) tem poucas linhas de log e
+metrica no meio -- microsssegundos. Matar o processo nesse instante seria sorte.
 
-**O que falta:** os dois caminhos **no mesmo cenario**, com o processo morto entre os
-dois momentos. E a garantia mais forte do enunciado -- dinheiro nao se move duas vezes
-**e** o consumidor reconhece a reentrega pela inbox.
+**Como ficou resolvido.** O worker passou a depender de uma interface `Fila`, no mesmo
+desenho que `outbox.Publicador` ja usava, e o teste injeta a falha exatamente onde ela
+acontece. O estado duravel que sobra e o mesmo do crash: commit confirmado, mensagem
+presente na fila.
 
-**Como fechar:** um cenario que (a) publica na fila, (b) espera a inbox registrar,
-(c) mata a instancia com `Stop` em vez de deixar o commit do consumidor terminar de
-apagar, (d) sobe outra instancia e (e) verifica um unico debito.
+**O que o teste prova, e o que ele nao finge.** Ele nao derruba processo nenhum, e o
+doc comment do teste diz isso. A cadeia que ele exercita:
 
-**Preco:** um cenario. O que torna o cenario dificil e que o `Stop` gracioso **apaga** a
-mensagem antes de parar -- seria preciso um `Stop` que nao espera os hooks, ou um kill
-do processo. Essa e a razao pela qual o cenario foi adiado em vez de escrito errado.
+1. a primeira instancia consome e confirma o commit (saldo 100 -> 75);
+2. a remocao da mensagem falha, e a mensagem continua na fila;
+3. a primeira instancia e **parada**, para que quem reentregue nao seja ela;
+4. quando o timeout de visibilidade expira, a segunda instancia recebe a mensagem;
+5. a segunda reconhece a operacao como processada, devolve o resultado persistido e apaga.
+
+O passo 3 e o que faz o teste valer. Sem ele, a propria primeira instancia reentregaria a
+mensagem aos 60s e o teste passaria sem provar que **outro processo** retoma o trabalho.
+
+**O defeito que ele encontrou -- e grave.** Ver secao 6.3: `Inbox.Concluir` nunca era
+chamado em producao, entao `completed_at` ficava sempre nulo. O passo 5 do cenario so pode
+ser verificado com a inbox concluida, entao o teste do cenario 5 foi justamente o que
+descobriu que a inbox nunca foi concluida.
+
+Custa cerca de 60s, que e o timeout de visibilidade da fila, esperando de verdade.
 
 ### 5.2 ~~Faltam `REFUND` antes da `BET`~~ **FECHADO NESTA ETAPA**
 
@@ -280,7 +312,55 @@ verificada contra o comportamento real do worker antes de virar `CHECK`. Uma con
 que impede um caminho legitimo e pior que nenhuma constraint: ela transforma um bug de
 logica em bug de dado, e o sintoma passa a apontar para o banco.
 
-### 6.2 Onde a auditoria mudou o codigo alem do defeito
+### 6.2 A inbox nunca era concluida
+
+**Sintoma:** `completed_at` de `inbox_messages` era **sempre nulo** em producao. Quem
+consultasse a inbox nao distinguia "esta mensagem foi tratada" de "o processo morreu no
+meio" -- as duas coisas tinham o mesmo formato, e a segunda e exatamente a que o
+operador precisa identificar.
+
+**Causa:** `RepositorioInbox.Concluir` existe, esta testado no nivel do repositorio
+(`tests/integration/repositorios/mensageria_test.go`), e **nenhum codigo de producao
+chamava**. O `INSERT` do registro acontecia; o `UPDATE` da conclusao, nunca. O
+enunciado pede justamente as duas coisas -- "o registro da inbox **e a conclusao duravel**
+do tratamento devem compartilhar a transacao SQL" -- e so a primeira estava feita.
+
+**Por que a idempotencia funcionava mesmo assim.** Porque ela nao depende de
+`completed_at`. A garantia de dinheiro vem da chave de idempotencia e do fingerprint, e
+nao da coluna. Ou seja: **o sistema nunca esteve errado sobre dinheiro**, e mesmo assim
+tinha uma garantia a menos do que o enunciado pede, sem nenhum teste que reclamasse. O
+defeito era de evidencia e de operabilidade, nao de saldo.
+
+**Como foi encontrado.** Pelo teste do cenario 5. O passo final do cenario so pode ser
+verificado com a inbox concluida, entao a primeira versao do teste reprovou com "a inbox
+tem 0 concluidas e 1 registrada". Nenhuma suite anterior verificava `completed_at`, porque
+o `INSERT` funcionava e o `UPDATE` nao era exercitado.
+
+**Correcao:** `concluirInbox` em `internal/app/processar_operacao.go`, chamada depois de
+`confirmar` e dentro da mesma unidade. Fora de `confirmar` porque `confirmar` cuida do
+desfecho da OPERACAO e o inbox pertence a ENTREGA da mensagem -- a mesma operacao chega
+por HTTP e nao tem mensagem nenhuma para concluir. E depois de `confirmar` porque os tres
+desfechos dele -- `PROCESSED`, `REJECTED` e `PENDING_REFERENCE` -- sao duraveis e nos tres
+a mensagem foi tratada; fechar so no caminho feliz deixaria a recusa de saldo com a linha
+da inbox pendente para sempre. O caminho do replay registra e conclui na mesma unidade,
+porque deixar `completed_at` nulo ali seria afirmar o oposto do que aconteceu.
+
+### 6.3 A coluna `attempts` da inbox e morta
+
+`attempts` foi criada com o comentario "conta as reentregas" (`00001_schema_inicial.sql`),
+mas `Inbox.Registrar` usa `ON CONFLICT DO NOTHING` e **nunca a incrementa**. O valor fica
+sempre em 1, que e o default da coluna.
+
+Nao foi corrigido nesta etapa, e a decisao e registrar em vez de adivinhar: `attempts`
+precisa de semantica que o codigo ainda nao tem. Incrementar so quando o INSERT conflita
+exige um `RETURNING` ou um `UPDATE` separado, e incrementar em toda entrega -- inclusive na
+primeira -- mudaria o significado da coluna. E o dado ja existe em outro lugar: o
+`ApproximateReceiveCount` da propria fila. Duas fontes para o mesmo fato, uma delas morta.
+
+Enquanto a coluna estiver morta, **ninguem deve le-la** para decidir se uma mensagem
+precisa de reprocessamento: ela diz que houve uma entrega quando houve duas.
+
+### 6.4 Onde a auditoria mudou o codigo alem dos defeitos
 
 **`internal/obs/metrica.go` passou a explicar por que usa `float64`.** Detalhado na
 secao 1: o eliminatorio 3 e "dinheiro nao pode passar por `float64`", a busca por essa
@@ -300,22 +380,43 @@ contagem e duracao.
 | `Dockerfile`: binario `migrate` na mesma imagem | O `migrate` roda em container separado e nao pode depender de volume de codigo |
 | `internal/runtime/healthcheck/` + subcomando `healthcheck` | Imagem distroless nao tem curl, nem wget, nem shell para o probe |
 | `COMO-EXECUTAR.md` | Fechar 5.4: roteiro de ponta a ponta, validado contra o Compose |
+| `internal/consumidor/consumidor.go`: interface `Fila` | Tornar observavel a janela entre o commit e o apagamento |
+| `internal/app/processar_operacao.go`: `concluirInbox` | Defeito 6.2: `completed_at` nunca era preenchido em producao |
+| `internal/sqs/sqs.go` e `internal/runtime/app/consumidor.go`: remocao de `EsperaMaxima` | Campo morto que prometia controlar o long polling e nao controlava |
+| `consumidorteste/consumidor_test.go`: cenario 5 | Fechar 5.1: reentrega depois do commit |
+| `tests/integration/ciclo/ciclo_test.go`: comentario orfao removido | O arquivo terminava no meio de um doc comment sem funcao |
 | `docs/auditoria.md` | Este arquivo |
 
 ---
 
 ## 8. Ordem sugerida das proximas etapas
 
-1. **Fechar 5.1** -- o crash entre commit e remocao da mensagem. O unico cenario do
-   enunciado sem teste dedicado, e o mais caro: exige um shutdown que nao espera os
-   hooks, ou matar o processo.
-2. **E20** -- carga com k6. **Rodar com o `wager-service` do Compose parado**: ele consome a
-   mesma fila dos testes e faz `pendenciasteste` falhar com "pendencia nao retomada" e
-   `deadlock`, que imita bug de concorrencia sem ser um.
-3. **5.3** -- a decisao sobre `fx.Module`, ja registrada em `ARCHITECTURE.md` com o
+**As quatro lacunas de 5.1 a 5.4 estao fechadas.** Restam duas perguntas e duas etapas:
+
+1. **5.3** -- a decisao sobre `fx.Module`, ja registrada em `ARCHITECTURE.md` com o
    argumento de que e agrupamento cosmetico; falta so decidir se o avaliador e estrito
    o bastante para reprovar por isso.
+2. **A coluna `attempts` da inbox** -- ver 6.3. Decisao a tomar, nao bug a corrigir: ou
+   ganha semantica de reentrega, ou sai do schema. A segunda opcao e mais honesta ate
+   que alguem precise do dado, porque `ApproximateReceiveCount` da fila ja conta entregas.
+3. **E20** -- carga com k6.
 4. **E21** -- documentacao final.
+
+**Ao rodar a integracao, pare o `wager-service` do Compose**: ele consome a mesma fila dos
+testes e faz `pendenciasteste` falhar com "pendencia nao retomada" e `deadlock`, que imita
+bug de concorrencia sem ser um.
+
+### O que a E20 custou em correcao, e nao em escrita
+
+O cenario 5 foi escrito para provar que a reentrega nao move dinheiro duas vezes, e o
+primeiro resultado foi `a inbox tem 0 concluidas e 1 registrada`. **A garantia que o teste
+ia verificar dependia de uma coluna que ninguem preenchia.** Nenhum dos vinte e um
+cenarios anteriores verificava `completed_at`, porque o `INSERT` funcionava e o `UPDATE`
+nao era exercitado por ninguem.
+
+Vale o padrao: um teste que verifica o **estado** depois de um caminho feliz encontra
+defeitos que um teste que verifica o **resultado** nao encontra. O saldo estava certo em
+todo mundo; o que nao existia era a distincao entre "tratado" e "orfao".
 
 ### O que a E19 custou em correcao, e nao em escrita
 

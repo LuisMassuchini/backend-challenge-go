@@ -110,10 +110,44 @@ func ErroDeMensagem(err error) bool {
 	return errors.As(err, &malformada)
 }
 
+// Fila e o que o worker precisa da fila.
+//
+// E interface, e nao o cliente SQS concreto, pelo mesmo motivo que
+// `outbox.Publicador` e interface: o worker decide tres coisas -- receber, apagar,
+// estender visibilidade -- e nenhuma delas e sobre SQS. Um worker que conhecesse a
+// SDK teria o contrato do broker dentro da logica de consumo, e o teste do worker
+// passaria a exigir um broker para provar uma decisao que e do worker.
+//
+// A porta existe por um motivo concreto, e ele e o cenario 5 do enunciado: "interrompa
+// um consumidor depois do commit e antes da remocao da mensagem". Com o cliente
+// concreto nao ha como escrever esse teste. A janela entre o commit, em
+// `internal/pg/unidade.go`, e o `DeleteMessage`, aqui em `apagar`, tem poucas linhas de
+// log no meio -- e matar o processo nesse instante e loteria. Com a interface, o teste
+// injeta a falha exatamente onde ela acontece, e o estado duravel que sobra e o mesmo:
+// commit confirmado, mensagem presente na fila.
+//
+// Os quatro metodos sao os que o worker chama. `URL` entra porque o log de partida
+// precisa dizer de qual fila o worker esta falando, e um log que omite a fila deixa o
+// operador sem o dado que identifica o worker quando ha varias instancias.
+type Fila interface {
+	// Receber busca ate o limite de mensagens.
+	Receber(ctx context.Context, limite int32) ([]sqs.Mensagem, error)
+
+	// Concluir remove a mensagem da fila, com o recibo do recebimento.
+	Concluir(ctx context.Context, recibo string) error
+
+	// EstenderVisibilidade prolonga o tempo em que a mensagem fica invisivel para os
+	// demais.
+	EstenderVisibilidade(ctx context.Context, recibo string, por time.Duration) error
+
+	// URL e o endereco da fila.
+	URL() string
+}
+
 // Worker percorre a fila.
 type Worker struct {
-	// fila e o cliente da fila.
-	fila *sqs.Cliente
+	// fila e a fila.
+	fila Fila
 
 	// servicos sao os casos de uso.
 	servicos app.Servicos
@@ -143,8 +177,8 @@ type Worker struct {
 
 // Dependencias e o que o worker precisa.
 type Dependencias struct {
-	// Fila e o cliente da fila.
-	Fila *sqs.Cliente
+	// Fila e a fila.
+	Fila Fila
 
 	// Servicos sao os casos de uso.
 	Servicos app.Servicos
@@ -387,7 +421,6 @@ func (w *Worker) apagar(ctx context.Context, mensagem sqs.Mensagem) bool {
 	return true
 }
 
-// comandoDaMensagem converte o corpo no comando de caso de uso.
 // comandoDaMensagem converte a mensagem no comando de caso de uso.
 //
 // A funcao recebe a `sqs.Mensagem` inteira, e nao so o corpo, porque o comando precisa

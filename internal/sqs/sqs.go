@@ -40,6 +40,20 @@ type Cliente struct {
 }
 
 // Opcoes e a configuracao do cliente.
+//
+// Nao ha campo de long polling aqui, e a ausencia e deliberada. Havia um `EsperaMaxima`,
+// preenchido pelo grafo com dez segundos, documentado como "o limite de espera do long
+// polling" -- e nunca lido. `ReceiveMessage` nao montava `WaitTimeSeconds`, entao o campo
+// nao controlava nada.
+//
+// Implementar o campo como estava teria sido uma REGRESSAO, e nao a correcao que o nome
+// sugeria: o long polling de verdade ja vinha do atributo da fila, com vinte segundos em
+// `deploy/localstack/init/00-filas.sh`, e um `WaitTimeSeconds` de dez na chamada da API
+// SOBRESCREVE o atributo. O efeito seria trocar vinte por dez e mais requisicoes.
+//
+// O shutdown nao depende de teto de espera nenhum: `Receber` recebe o contexto do worker e
+// a SDK aborta o long poll no cancelamento, e `Worker.Rodar` ainda confere `ctx.Err()`
+// antes de cada chamada.
 type Opcoes struct {
 	// Endpoint e o endereco do SQS. Vazio usa o endpoint real da AWS.
 	Endpoint string
@@ -64,14 +78,6 @@ type Opcoes struct {
 	// So o publicador usa este campo. O cliente de operacoes nao, porque ele nao
 	// publica evento: quem publica evento e o relay, e ele tem o proprio cliente.
 	FilaEventos string
-
-	// EsperaMaxima e o limite de espera do long polling.
-	//
-	// O limite existe porque o SDK aumentaria o valor e a chamada passaria a esperar
-	// muito mais que o tempo de espera do ciclo, e um worker que para de percorrer a
-	// fila no shutdown e um worker que perde mensagens ate o timeout de visibilidade
-	// expirar.
-	EsperaMaxima time.Duration
 }
 
 // Novo constroi o cliente.

@@ -446,7 +446,3 @@ func consultarTolerante(base, caminho string) int {
 
 	return resp.StatusCode
 }
-
-//
-// Existe para o teste de shutdown poder observar a ordem dos hooks sem que o log de
-// transicao do processo atrapalhe a leitura da falha.
