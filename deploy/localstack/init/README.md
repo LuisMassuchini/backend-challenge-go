@@ -7,8 +7,8 @@
 # ambiente nao tem. Provisionar por script faz o teste de integracao depender
 # apenas de `docker compose up -d`.
 #
-# Nada aqui ainda: as filas `wager-transactions.fifo` e
-# `wager-transactions-dlq.fifo` entram na etapa de consumidor SQS, junto com a
-# decisao de MessageGroupId, MessageDeduplicationId, visibility timeout e limite
-# de tentativas. Criar a fila antes de decidir esses parametros seria escolher a
-# politica duas vezes, e a segunda em silencio.
+# O provisionamento esta em `00-filas.sh`. As filas `wager-transactions.fifo` e
+# `wager-transactions-dlq.fifo` nascem de la, com a politica de redrive ja decided: FIFO,
+# long polling de 20s, visibility timeout de 60s, tres tentativas antes da fila morta e
+# redrivePermitida. A cartao morto e criada primeiro para que a ARN exista quando a
+# politica da fila de operacoes e montada.

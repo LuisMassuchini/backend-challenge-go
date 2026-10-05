@@ -62,9 +62,14 @@ services:
       - "${WAGER_SQS_PORT:-4566}:4566"
     volumes:
       - localstack-dados:/var/lib/localstack
-      # Os hooks de init rodam uma vez, no start. As filas FIFO e a politica de
-      # redrive nascem daqui, provisioned por codigo e nao por clique.
-      - ./deploy/localstack/init:/etc/localstack/init/hooks:ro
+      # As filas FIFO e a politica de redrive nascem daqui, provisioned por codigo e
+      # nao por clique.
+      #
+      # O destino e `init/ready.d` e nao `init/hooks`: o LocalStack 4 deixou de
+      # varrer o diretorio antigo, e um script em `hooks` era silenciosamente
+      # ignorado -- o ambiente subia sem fila e o primeiro teste de consumidor
+      # falhava com NonExistentQueue, sem nenhuma pista de que o hook nem rodou.
+      - ./deploy/localstack/init:/etc/localstack/init/ready.d:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:4566/_localstack/health | grep -q '\"sqs\"'"]
       interval: 5s

@@ -98,13 +98,14 @@ func New(cfg config.Config, eventos *Eventos) *app {
 		erroDePartida: validarParaSubir(cfg),
 	}
 
-	a.interno = fx.New(
+	opcoes := []fx.Option{
 		fx.Supply(cfg, eventos),
 		fx.Provide(
 			construirPool,
 			construirServicos,
 			construirValidador,
 			construirProntidao,
+			construirFila,
 			construirServidorHTTP,
 		),
 		fx.Invoke(registrarCicloDeVida),
@@ -113,7 +114,29 @@ func New(cfg config.Config, eventos *Eventos) *app {
 		// providers nunca pedidos, e a aplicacao subiria sem abrir porta nenhuma --
 		// parecendo pronta e recusando conexao.
 		fx.Invoke(ligarGrafo),
-	)
+	}
+
+	// O consumidor entra no grafo apenas quando ha fila configurada.
+	//
+	// A condicao esta aqui e nao dentro do provider porque o Fx resolve as
+	// dependencias de todo Invoke registration. Com o consumidor sempre registrado, um
+	// processo sem SQS configurado dependeria do pool de Postgres para montar um
+	// worker que nunca vai rodar, e o teste de ciclo de vida sem banco passaria a
+	// falhar por um motivo que nao tem a ver com o que ele verifica.
+	//
+	// A ordem importa no encerramento: o consumidor e registrado antes do servidor,
+	// e o Fx executa os OnStop na ordem inversa. Assim o servidor HTTP para primeiro
+	// -- recusando requisicao nova e terminando as que ja entraram -- e so entao o
+	// consumidor para, sem deixar transacao aberta por causa de uma requisicao que
+	// ainda estava chegando.
+	if cfg.SQS.Endpoint != "" {
+		opcoes = append(opcoes,
+			fx.Provide(construirConsumidor),
+			fx.Invoke(registrarConsumidor),
+		)
+	}
+
+	a.interno = fx.New(opcoes...)
 
 	return a
 }
