@@ -1,4 +1,4 @@
-// Package db e a borda de persistencia: pool, migrations e unidade transacional.
+// Package pg e a borda de persistencia: pool, migrations e unidade transacional.
 //
 // Este pacote e onde o SQL aparece. Nenhum outro pacote do sistema escreve
 // consulta, e o dominio nao importa nada daqui: a dependencia aponta sempre do
@@ -9,7 +9,7 @@
 // ambiente em que mais importa -- o container, que nao tem o codigo fonte -- e
 // porque um binario que carrega a propria version de schema nao depende de o
 // arquivo traveling junto.
-package db
+package pg
 
 import (
 	"context"

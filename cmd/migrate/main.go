@@ -26,7 +26,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/LuisMassuchini/backend-challenge-go/internal/db"
+	pg "github.com/LuisMassuchini/backend-challenge-go/internal/pg"
 )
 
 func main() {
@@ -69,7 +69,7 @@ func run() error {
 		return fmt.Errorf("conexao com o postgres: %w", err)
 	}
 
-	migrador := db.NovoMigrator(conexao)
+	migrador := pg.NovoMigrator(conexao)
 
 	switch os.Args[1] {
 	case "up":
