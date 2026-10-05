@@ -220,6 +220,41 @@ operacao.
 reprocessamento original, e nao o saldo atual: recalcular devolveria a resposta de
 hoje para uma operacao de ontem.
 
+### A corrida da idempotencia: por que `ON CONFLICT DO NOTHING`
+
+Este foi o defeito mais caro do projeto, e ele **so apareceu com tres processos**.
+
+A resolucao de idempotencia tem tres passos em sequencia: procurar a chave, procurar o
+par provedor e identificador externo, e entao gravar. Entre a busca e a gravacao
+existe uma janela, e com tres instancias independentes a janela e real: A e B passam
+as duas buscas vendo a chave como nova, A grava, e B chega no `INSERT` e leva
+violacao do indice unico.
+
+**O que o codigo devolvia nessa hora:** o erro do `INSERT`, traduzido para
+`ErrConflitoDeChave`, que a borda traduz para 409. O provedor recebia conflito numa
+operacao que ele acabara de repetir sem mudar um byte do conteudo. A operacao nao
+duplicava, o ledger estava certo, e mesmo assim o provedor ficava proibido de repetir
+-- que e o eliminatorio "movimentacao duplicada" pela porta do lado oposto: o dinheiro
+nao move duas vezes, mas o cliente nunca consegue concluir a aposta.
+
+**Por que savepoint nao resolvia:** no PostgreSQL, um `INSERT` que viola indice unico
+**aborta a transacao inteira**, e depois dele todo comando responde `current
+transaction is aborted`. Nenhum savepoint evita isso: o savepoint protege contra erro
+de *comando*, nao contra o estado de erro que o comando deixa. Tentar tratar o conflito
+com savepoint chegou a `25P02` em quatro de cinquenta envios -- exatamente os que
+perderam a corrida.
+
+**A solucao:** `InserirSeNova` usa `ON CONFLICT DO NOTHING`, que nao aborta nada e
+devolve zero linhas. Zero linhas e o conflito, uma linha e o caminho normal, e quem
+chama distinguish os dois. O perdedor da corrida entao **rele o registro vencedor** e
+compara o hash com o do comando: hash igual e reentrega e devolve o resultado
+persistido; hash diferente e conflito de verdade e devolve 409.
+
+O silencio do `DO NOTHING` nao esconde o conflito -- e a contagem de linhas que o
+revela. E a razao de o `Inserir` original continuar sendo `INSERT` comum: ali conflito
+e erro que o chamador precisa sentir, e transformar o unico `DO NOTHING` do
+idempotencia em algo silencioso seria trocar um defeito conhecido por um pior.
+
 ---
 
 ## Transacoes e maquina de estados
@@ -415,6 +450,29 @@ em replay do resultado persistido.
 `next_attempt_at` para backoff. `SKIP LOCKED` permite varios publishers sem que um
 espero o outro, e e o que permite recuperar trabalho abandonado depois de uma
 interrupcao.
+
+**A inbox do replay e gravada em uma unidade propria, e nao na unidade da
+operacao.** Este nao e um detalhe de estilo: registrar a inbox dentro da unidade que
+pode abortar faz o registro desaparecer junto com o conflito, e a mensagem volta para
+a fila sem deixar rastro, repetindo o mesmo conflito ate a DLQ.
+
+E a ordem importa nos dois sentidos, e o caminho errado custa um `55P03`. Registrar a
+inbox **antes** da busca de idempotencia e o que produz o auto-bloqueio: o `INSERT` da
+inbox segura a linha da mensagem ate o fim daquela unidade, e a unidade do replay tenta
+gravar a MESMA linha e espera pelo lock que ela propria segura. So o `lock_timeout` de
+um segundo desfaz, e o sintoma e uma mensagem que volta para a fila com "lock nao
+disponivel" -- que parece falha de infraestrutura e e, na verdade, auto-bloqueio.
+
+Por isso: **a busca de idempotencia vem primeiro**, e o caminho de replay registra a
+inbox depois, em unidade propria. O caminho que vai aplicar a operacao registra a inbox
+na unidade dele, onde o `INSERT` e a unica escrita na linha.
+
+**`MessageDeduplicationId` precisa ser unica por mensagem, e nao por grupo.** A
+deduplicacao do SQS e uma janela de cinco minutos: duas mensagens do mesmo grupo com a
+mesma chave fazem o broker descartar a segunda. Isso apareceu no primeiro teste de
+cruzamento HTTP/SQS, e o sintoma enganava completamente -- a mensagem conflitante
+nunca chegava ao consumidor e o teste falhava dizendo "a inbox nao registrou", quando o
+que faltava era a publicacao.
 
 **A chave de particao da saida e o `aggregateId` do evento.** Esta era uma das duas
 decisoes que o plano mandava fechar antes de codar o relay, e ela e do agregado e

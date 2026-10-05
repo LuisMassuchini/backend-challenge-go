@@ -89,6 +89,68 @@ func (r RepositorioTransacoes) Inserir(ctx context.Context, q Querente, t wageri
 	return nil
 }
 
+// Inserir gravando a transacao sem falhar quando a chave ja existe.
+//
+// E a metade "nao falhar" da corrida de idempotencia. O `INSERT` aqui leva
+// `ON CONFLICT DO NOTHING`, que e o oposto do `Inserir` acima e pelo motivo exato: ali
+// conflito e erro que o chamador precisa saber, e aqui conflito e o resultado esperado
+// para uma reentrega.
+//
+// **Por que `ON CONFLICT` e nao savepoint:** no PostgreSQL, um `INSERT` que viola
+// indice unico aborta a transacao inteira -- nao importa quantos savepoints existam.
+// Depois dele, todo comando responde "current transaction is aborted" e a releitura do
+// registro vencedor, que e o que separa reentrega de conflito, fica impossivel. O
+// savepoint resolveria se o `INSERT` fosse a unica operacao da transacao; aqui ele vem
+// depois de duas leituras de idempotencia e antes do lock da carteira.
+//
+// O silencio do `DO NOTHING` nao esconde o conflito: devolve zero linhas, e quem chama
+// distingue o conflito de uma gravacao normal pela contagem. E a contagem que o caso de
+// uso usa para reler o vencedor.
+func (r RepositorioTransacoes) InserirSeNova(
+	ctx context.Context,
+	q Querente,
+	t wagering.Transacao,
+) (bool, error) {
+	if !t.Valida() {
+		return false, fmt.Errorf("pg: transacao invalida")
+	}
+
+	tag, err := q.Exec(ctx, `
+		INSERT INTO wager_transactions (
+			id, provider_id, external_transaction_id, idempotency_key, content_hash,
+			wallet_id, player_id, round_id, game_id, kind, money_amount, currency,
+			reference_external_id, state, failure_code,
+			result_amount, result_currency, created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
+		ON CONFLICT DO NOTHING`,
+		t.ID().UUID(),
+		ouNulo(t.Provedor().Valida(), t.Provedor()),
+		ouNulo(t.TransacaoExterna().Valida(), t.TransacaoExterna()),
+		ouNulo(t.ChaveIdempotencia().Valida(), t.ChaveIdempotencia()),
+		ouNulo(t.HashConteudo().Valida(), t.HashConteudo()),
+		t.Carteira().UUID(),
+		t.Jogador().UUID(),
+		ouNulo(t.Rodada().Valida(), t.Rodada()),
+		ouNulo(t.Jogo().Valida(), t.Jogo()),
+		string(t.Tipo()),
+		t.Valor().Amount(),
+		string(t.Valor().Currency()),
+		ouNulo(t.Referencia().Externa.Valida(), t.Referencia().Externa),
+		string(t.Estado()),
+		ouNuloTexto(t.CodigoFalha().Presente(), string(t.CodigoFalha())),
+		resultadoAmount(t),
+		resultadoMoeda(t),
+		t.CriadaEm(),
+	)
+	if err != nil {
+		return false, classificarErroDeEscrita(err, fmt.Errorf("pg: insercao da transacao: %w", err))
+	}
+
+	// Zero linhas e o conflito. Uma linha gravada e o caminho normal.
+	return tag.RowsAffected() > 0, nil
+}
+
 // resultadoAmount devolve o resultado persistido, ou nil quando a transacao ainda
 // nao terminou.
 //

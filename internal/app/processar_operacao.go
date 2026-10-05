@@ -141,16 +141,46 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		// A idempotencia e resolvida antes de qualquer escrita. E a unica ordem
 		// segura: gravar a transacao primeiro e so depois consultar ja teria criado
 		// a linha que a idempotencia existe para impedir.
+		// A inbox e registrada PRIMEIRO, antes de qualquer busca de idempotencia.
+		//
+		// A ordem e obrigatoria e vale registrar o por que. A inbox responde "esta
+		// mensagem ja foi vista", e a resposta precisa ser verdadeira mesmo quando a
+		// operacao ja existia: a mensagem chegou, foi reconhecida como reentrega e nao
+		// precisa de tratamento. Registrar depois da busca faria a linha nao existir
+		// nesse caminho -- que e o caminho mais comum de reentrega, e o caso em que o
+		// registro mais importa.
+		//
+		// Registrar antes tambem cobre o caminho de erro: a unidade aborta e a mensagem
+		// volta, e a proxima entrega encontra o registro e sabe o que fazer.
 		existente, err := s.Transacoes.BuscarPorChave(ctx, q, req.Chave)
 		switch {
 		case err == nil:
 			s.registraDuplicata("chave")
-			resposta, err = responderReplay(existente, req)
-			return err
+			// O replay registra a inbox em uma unidade PROPRIA, e nao nesta.
+			//
+			// Registrar aqui e o que produzia `55P03`: o `INSERT` da inbox segura a
+			// linha da mensagem ate o fim desta unidade, e a unidade do replay tenta
+			// gravar a MESMA linha e espera pelo lock que ela mesma segura -- um
+			// auto-bloqueio que so o `lock_timeout` de um segundo desfazia, devolvendo
+			// erro e fazendo a mensagem voltar para a fila.
+			//
+			// O registro em unidade propria tambem sobrevive ao conflito, que aborta
+			// esta unidade. E o que faz a mensagem deixar rastro mesmo quando a
+			// resposta e 409.
+			return s.resolverReplay(ctx, existente, req, &resposta)
 		case errors.Is(err, pg.ErrNaoEncontrado):
 			// Segue: a chave e nova.
 		default:
 			return fmt.Errorf("idempotencia: %w", err)
+		}
+
+		// A inbox e registrada so no caminho que VAI aplicar a operacao.
+		//
+		// Registrar depois da busca e nao antes por dois motivos que se reforcam: o
+		// caminho de replay ja resolve a inbox em `resolverReplay`, e registrar aqui
+		// criaria o auto-bloqueio descrito acima.
+		if err := s.registrarInbox(ctx, q, req, agora); err != nil {
+			return err
 		}
 
 		// O segundo indice de idempotencia: a mesma operacao externa ja registrada
@@ -174,8 +204,21 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		if err != nil {
 			return traduzirFalhaDeRegra(err)
 		}
-		if err := s.Transacoes.Inserir(ctx, q, transacao); err != nil {
+
+		// O `ON CONFLICT DO NOTHING` e o que torna a corrida segura: um `INSERT` comum que
+		// perde a corrida aborta a transacao, e a releitura do registro vencedor -- que e
+		// o que separa reentrega de conflito -- ficaria impossivel.
+		//
+		// As duas buscas de idempotencia acima viram a chave como nova, e cada uma delas
+		// viu isso em um instante legitimo. Entre elas, outra instancia gravou a mesma
+		// operacao. `InserirSeNova` devolve `false` nesse caso, e o caminho abaixo rel o
+		// vencedor em vez de devolver conflito.
+		gravada, err := s.Transacoes.InserirSeNova(ctx, q, transacao)
+		if err != nil {
 			return err
+		}
+		if !gravada {
+			return s.resolverConflitoDeChave(ctx, q, req, &resposta)
 		}
 
 		carteira, err := s.Carteiras.LerParaAtualizar(ctx, q, req.Carteira)
@@ -243,6 +286,79 @@ func ProcessarOperacao(ctx context.Context, s Servicos, ator Ator, req Requisica
 		s.Metricas.ObservaOperacao(inicio, string(resposta.Estado))
 	}
 	return resposta, nil
+}
+
+// resolverConflitoDeChave trata a perda da corrida do INSERT.
+//
+// A releitura e o que separa reentrega de conflito: quem ganhou a corrida ja gravou o
+// conteudo, e comparar o hash guardado com o do comando decide se era a mesma operacao
+// ou outra com a mesma chave. Sem a releitura, a unica informacao disponivel e "alguem
+// gravou antes", e essa informacao nao distingue os dois casos.
+//
+// A releitura pode nao encontrar a linha: quem ganhou a corrida ainda pode estar com a
+// transacao aberta, e o `INSERT` desta so espera o indice unico, nao o commit da outra.
+// Devolver "reprocessar depois" e o desfecho honesto -- a reentrega do provedor vai
+// encontrar a linha ja confirmada.
+func (s Servicos) resolverConflitoDeChave(
+	ctx context.Context,
+	q pg.Querente,
+	req RequisicaoOperacao,
+	resposta *RespostaOperacao,
+) error {
+	existente, err := s.Transacoes.BuscarPorChave(ctx, q, req.Chave)
+	if err != nil {
+		if errors.Is(err, pg.ErrNaoEncontrado) {
+			// Quem gravou ainda nao confirmou. O `ON CONFLICT` esperou o indice unico, e
+			// o indice so e liberado quando a transacao da outra instancia confirma; a
+			// linha pode ter sumido se ela tiverabortado entre resolver o indice e
+			// confirmar. A transacao deste comando foi desfeita junto com a unidade, e o
+			// provedor reenviando encontra o resultado. Devolver 409 aqui seria mentira.
+			return fmt.Errorf("%w: a operacao com a chave %q esta sendo gravada por outra instancia",
+				pg.ErrConflitoDeVersao, req.Chave)
+		}
+		return fmt.Errorf("idempotencia apos conflito: %w", err)
+	}
+
+	s.registraDuplicata("corrida")
+	*resposta, err = responderReplay(existente, req)
+	return err
+}
+
+// resolverReplay responde a uma operacao que ja existe.
+//
+// E funcao separada porque o replay tem uma exigencia que a operacao nova nao tem:
+// ele **precisa** confirmar a inbox, mesmo quando a resposta e conflito. O conflito faz
+// a unidade abortar, e o registro da inbox -- que estava dentro dela -- desapareceria
+// junto. A mensagem voltaria para a fila sem rastro, repetiria o mesmo conflito ate a
+// DLQ, e o operador veria uma fila morta sem nenhum registro de que a mensagem chegou.
+//
+// Por isso o registro da inbox vai em uma unidade propria, FORA da unidade que pode
+// abortar. A inbox responde "esta mensagem foi vista", e essa verdade nao depende de a
+// operacao ter sido aplicada.
+func (s Servicos) resolverReplay(
+	ctx context.Context,
+	existente wagering.Transacao,
+	req RequisicaoOperacao,
+	resposta *RespostaOperacao,
+) error {
+	// O registro vai em uma unidade propria porque o conflito aborta a unidade corrente.
+	// Sem isso, o registro da inbox desapareceria junto -- e a mensagem voltaria para a
+	// fila sem rastro, repetindo o mesmo conflito ate a DLQ.
+	//
+	// O `Registrar` usa `ON CONFLICT DO NOTHING`: registrar de novo uma mensagem que
+	// ja estava na inbox e correto e barato.
+	if req.MensagemID != "" && req.Consumidor != "" {
+		if err := s.Unidade.Executar(ctx, func(nova pg.Querente) error {
+			return s.Inbox.Registrar(ctx, nova, req.Consumidor, req.MensagemID,
+				req.Fingerprint.String(), s.agora())
+		}); err != nil {
+			return fmt.Errorf("inbox do replay: %w", err)
+		}
+	}
+
+	var erroReplay error
+	*resposta, erroReplay = responderReplay(existente, req)
+	return erroReplay
 }
 
 // confirmar grava o desfecho na unidade.
