@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -200,6 +201,7 @@ func (r RepositorioOutbox) Reservar(
 		       version, occurred_at, attempts
 		  FROM outbox_events
 		 WHERE published_at IS NULL
+		   AND failed_at IS NULL
 		   AND next_attempt_at <= $1
 		   AND (leased_until IS NULL OR leased_until < $1)
 		 ORDER BY occurred_at, id
@@ -324,8 +326,49 @@ func (r RepositorioOutbox) Reprogramar(
 	return nil
 }
 
-// restaurarEvento reconstitui o evento imutavel a partir do registro da outbox.
+// Desistir marca o evento como falha permanente de publicacao.
 //
+// E o desfecho para o que a retentativa nao resolve: um envelope que nao serializa, ou
+// um broker que recusa este conteudo. Nenhuma das duas passa na decima segunda
+// tentativa, e insistir seria gastar recurso contra um defeito ja provado.
+//
+// O registro NAO e apagado. Apagar evento perderia a evidencia de que ele existiu e
+// nao foi publicado, e o papel de runtime nao tem DELETE -- a mesma garantia que
+// protege o ledger. O que fica e o motivo e o instante, que e o que o operador precisa
+// para decidir se republica a mao.
+//
+// `WHERE published_at IS NULL AND failed_at IS NULL` e o que torna a desistencia
+// terminal: um relay que pegou o registro e desistiu impede outro relay de insistir,
+// sem coordenacao entre eles.
+func (r RepositorioOutbox) Desistir(
+	ctx context.Context,
+	q Querente,
+	id wallet.Identificador,
+	motivo string,
+	agora time.Time,
+) error {
+	if strings.TrimSpace(motivo) == "" {
+		return fmt.Errorf("pg: motivo da desistencia ausente")
+	}
+
+	tag, err := q.Exec(ctx, `
+		UPDATE outbox_events
+		   SET failed_at = $2,
+		       failure_reason = $3,
+		       leased_until = NULL,
+		       leased_by = NULL
+		 WHERE id = $1 AND published_at IS NULL AND failed_at IS NULL`,
+		id.UUID(), agora, motivo,
+	)
+	if err != nil {
+		return classificarErroDeEscrita(err, fmt.Errorf("pg: desistencia da publicacao: %w", err))
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: evento %s", ErrNaoEncontrado, id)
+	}
+	return nil
+}
+
 // restaurarEvento reconstitui o evento imutavel a partir do registro da outbox.
 //
 // O eventId vem do registro, e nao e gerado aqui: e ele que precisa sobreviver a um

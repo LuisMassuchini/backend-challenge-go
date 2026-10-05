@@ -100,6 +100,11 @@ func New(cfg config.Config, eventos *Eventos) *app {
 
 	opcoes := []fx.Option{
 		fx.Supply(cfg, eventos),
+		// O relay da outbox e registrado depois do consumidor e do worker de
+		// pendencias para que, no encerramento, ambos parem antes: enquanto ainda ha
+		// quem produza evento, o relay precisa estar vivo senao o ultimo evento do
+		// processo ficaria sem publicacao. A ordem de parada e o inverso da de
+		// registro, e e ela que garante que o servidor HTTP para primeiro.
 		fx.Provide(
 			construirPool,
 			construirServicos,
@@ -109,10 +114,6 @@ func New(cfg config.Config, eventos *Eventos) *app {
 			construirWorkerDePendencias,
 			construirServidorHTTP,
 		),
-		// O worker de pendencias e registrado depois do consumidor de fila para que, no
-		// encerramento, o consumidor pare antes: enquanto o consumidor ainda aplica
-		// operacoes, o worker precisa estar vivo senao uma pendencia criada no ultimo
-		// segundo ficaria sem ninguem para retomar.
 		fx.Invoke(registrarWorkerDePendencias),
 		fx.Invoke(registrarCicloDeVida),
 		// O grafo do Fx e preguicoso: um provider so e construido quando alguem
@@ -137,8 +138,9 @@ func New(cfg config.Config, eventos *Eventos) *app {
 	// ainda estava chegando.
 	if cfg.SQS.Endpoint != "" {
 		opcoes = append(opcoes,
-			fx.Provide(construirConsumidor),
+			fx.Provide(construirConsumidor, construirRelayDaOutbox),
 			fx.Invoke(registrarConsumidor),
+			fx.Invoke(registrarRelayDaOutbox),
 		)
 	}
 

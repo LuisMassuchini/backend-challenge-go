@@ -13,6 +13,8 @@ set -euo pipefail
 
 FILA_OPERACOES="wager-transactions.fifo"
 FILA_CARTAO_MORTO="wager-transactions-dlq.fifo"
+FILA_EVENTOS="wager-events.fifo"
+FILA_EVENTOS_CARTAO_MORTO="wager-events-dlq.fifo"
 
 # Long polling: sem ele o consumidor gasta uma requisicao HTTP por ciclo mesmo sem
 # mensagem nenhuma. Com ele a chamada espera no servidor ate chegar algo ou esgotar
@@ -92,4 +94,67 @@ URL_OPERACOES=$(awslocal sqs get-queue-url \
   --queue-name "$FILA_OPERACOES" --query QueueUrl --output text)
 
 echo "[filas] operacoes em $URL_OPERACOES"
+
+# ---------------------------------------------------------------------------------------------
+# Fila de saida dos eventos.
+# ---------------------------------------------------------------------------------------------
+#
+# E a fila que o relay da outbox publica e que o consumidor de integracao le. Ela e
+# separada da fila de operacoes porque os contratos sao diferentes: uma leva comandos
+# de jogo, a outra leva envelope de evento com eventId estavel entre republicacoes.
+#
+# A chave de particao da saida e o agregado do evento, e nao a carteira nem o provedor.
+# Ver a secao "Inbox e outbox" do ARCHITECTURE.md para o por que e o que o enunciado
+# exige que seja uma decisao documentada.
+#
+# O visibility timeout e maior que o da fila de operacoes porque o consumidor de
+# integracao processa um evento por vez, normalmente com confirmacao manual, e um
+# timeout curto entregaria o mesmo evento a dois consumidores ao mesmo tempo.
+
+echo "[filas] criando $FILA_EVENTOS_CARTAO_MORTO"
+
+cat > "$TRABALHO/atributos-eventos-cartao-morto.json" <<JSON
+{
+  "FifoQueue": "true",
+  "ContentBasedDeduplication": "false",
+  "ReceiveMessageWaitTimeSeconds": "0",
+  "VisibilityTimeout": "$VISIBILITY_TIMEOUT_DLQ"
+}
+JSON
+
+awslocal sqs create-queue \
+  --queue-name "$FILA_EVENTOS_CARTAO_MORTO" \
+  --attributes "file://$TRABALHO/atributos-eventos-cartao-morto.json" \
+  > /dev/null
+
+URL_EVENTOS_CARTAO_MORTO=$(awslocal sqs get-queue-url \
+  --queue-name "$FILA_EVENTOS_CARTAO_MORTO" --query QueueUrl --output text)
+ARN_EVENTOS_CARTAO_MORTO=$(awslocal sqs get-queue-attributes \
+  --queue-url "$URL_EVENTOS_CARTAO_MORTO" --attribute-names QueueArn \
+  --query 'Attributes.QueueArn' --output text)
+
+echo "[filas] cartao morto de eventos em $ARN_EVENTOS_CARTAO_MORTO"
+
+echo "[filas] criando $FILA_EVENTOS"
+
+cat > "$TRABALHO/atributos-eventos.json" <<JSON
+{
+  "FifoQueue": "true",
+  "ContentBasedDeduplication": "false",
+  "ReceiveMessageWaitTimeSeconds": "$LONG_POLLING",
+  "VisibilityTimeout": "$VISIBILITY_TIMEOUT",
+  "RedrivePolicy": "{\"maxReceiveCount\":\"$MAX_RECEIVE\",\"deadLetterTargetArn\":\"$ARN_EVENTOS_CARTAO_MORTO\"}",
+  "RedriveAllowPolicy": "{\"redrivePermission\":\"byQueue\",\"sourceQueueArns\":[\"*\"]}"
+}
+JSON
+
+awslocal sqs create-queue \
+  --queue-name "$FILA_EVENTOS" \
+  --attributes "file://$TRABALHO/atributos-eventos.json" \
+  > /dev/null
+
+URL_EVENTOS=$(awslocal sqs get-queue-url \
+  --queue-name "$FILA_EVENTOS" --query QueueUrl --output text)
+
+echo "[filas] eventos em $URL_EVENTOS"
 echo "[filas] prontas"

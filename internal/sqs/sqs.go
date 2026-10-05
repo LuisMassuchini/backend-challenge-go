@@ -6,6 +6,7 @@ package sqs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -57,6 +58,12 @@ type Opcoes struct {
 
 	// FilaDeadLetter e o nome da fila de cartao morto.
 	FilaDeadLetter string
+
+	// FilaEventos e o nome da fila de saida dos eventos.
+	//
+	// So o publicador usa este campo. O cliente de operacoes nao, porque ele nao
+	// publica evento: quem publica evento e o relay, e ele tem o proprio cliente.
+	FilaEventos string
 
 	// EsperaMaxima e o limite de espera do long polling.
 	//
@@ -273,6 +280,126 @@ func (c *Cliente) Existe(ctx context.Context) error {
 			return fmt.Errorf("%w: %s", ErrFilaInexistente, "wager-transactions.fifo")
 		}
 		return fmt.Errorf("sqs: fila: %w", err)
+	}
+	return nil
+}
+
+// Publicador de eventos.
+//
+// E um cliente separado do de operacoes porque os dois destinos tem contratos
+// diferentes: a fila de operacoes leva comandos de jogo e a de eventos leva envelope
+// com eventId. Misturar os dois em um cliente so tornaria impossivel responder "qual
+// fila esta atrasada" sem olhar o conteiro.
+type Publicador struct {
+	api *sqs.Client
+
+	urlEventos string
+}
+
+// NovoPublicador constroi o publicador de eventos.
+func NovoPublicador(ctx context.Context, o Opcoes) (*Publicador, error) {
+	if o.FilaEventos == "" {
+		return nil, fmt.Errorf("%w: o nome da fila de eventos e obrigatorio", ErrFilaInexistente)
+	}
+
+	cfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(o.Regiao),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			o.ChaveDeAcesso, o.SegredoDeAcesso, "")),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqs: configuracao: %w", err)
+	}
+
+	api := sqs.NewFromConfig(cfg, func(opcoes *sqs.Options) {
+		if o.Endpoint != "" {
+			opcoes.BaseEndpoint = &o.Endpoint
+		}
+	})
+
+	publicador := &Publicador{api: api}
+	if publicador.urlEventos, err = publicador.resolverURL(ctx, o.FilaEventos); err != nil {
+		return nil, err
+	}
+	return publicador, nil
+}
+
+// resolverURL descobre o endereco de uma fila pelo nome.
+func (p *Publicador) resolverURL(ctx context.Context, nome string) (string, error) {
+	resposta, err := p.api.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: &nome})
+	if err != nil {
+		if errosDeFilaInexistente(err) {
+			return "", fmt.Errorf("%w: %s", ErrFilaInexistente, nome)
+		}
+		return "", fmt.Errorf("sqs: endereco de %s: %w", nome, err)
+	}
+	return *resposta.QueueUrl, nil
+}
+
+// Publicar envia um evento para a fila de saida.
+//
+// A chave de particao e o agregado do evento. E o que define a ordem na fila: eventos
+// do mesmo agregado nao saem em paralelo, e o consumidor ve a transacao processada
+// antes do saldo alterado, que e a ordem em que os fatos aconteceram.
+//
+// A deduplicacao do broker fica DESLIGADA de conteudo, e a MessageDeduplicationId leva o
+// eventId. A diferenca importa: a deduplicacao por conteudo do SQS e uma janela de
+// cinco minutos, e uma republicacao por falha de confirmacao pode acontecer muito
+// depois. Com o eventId como chave, o broker absorve a republicacao dentro da janela
+// e, fora dela, o consumidor reconhece o evento pelo eventId -- que e o contrato que
+// o enunciado pede, e nao a deduplicacao do broker.
+func (p *Publicador) Publicar(ctx context.Context, chaveDeParticao, corpo string) error {
+	eventID, err := eventIDDoEnvelope(corpo)
+	if err != nil {
+		return err
+	}
+
+	entrada := &sqs.SendMessageInput{
+		QueueUrl:               &p.urlEventos,
+		MessageBody:            &corpo,
+		MessageGroupId:         &chaveDeParticao,
+		MessageDeduplicationId: &eventID,
+	}
+	if _, err := p.api.SendMessage(ctx, entrada); err != nil {
+		return fmt.Errorf("sqs: envio de evento: %w", err)
+	}
+	return nil
+}
+
+// eventIDDoEnvelope extrai o eventId do envelope.
+//
+// E o MessageDeduplicationId, e nao o corpo inteiro: a deduplicacao do broker
+// compara a chave que recebe, e o que precisa ser reconhecido como o mesmo evento
+// entre duas republicacoes e a identidade dele, nao a serializacao. Usar o corpo
+// inteiro faria a chave mudar se o envelope fosse re-serializado, e a republicacao
+// viraria duplicata.
+func eventIDDoEnvelope(corpo string) (string, error) {
+	var envelope struct {
+		EventID string `json:"eventId"`
+	}
+	if err := json.Unmarshal([]byte(corpo), &envelope); err != nil {
+		return "", fmt.Errorf("%w: envelope nao e JSON: %v", ErrMensagemInvalida, err)
+	}
+	if envelope.EventID == "" {
+		return "", fmt.Errorf("%w: envelope sem eventId", ErrMensagemInvalida)
+	}
+	return envelope.EventID, nil
+}
+
+// URL devolve o endereco da fila de saida, para o log e os testes.
+func (p *Publicador) URL() string { return p.urlEventos }
+
+// Existe informa se a fila de eventos responde.
+func (p *Publicador) Existe(ctx context.Context) error {
+	entrada := &sqs.GetQueueAttributesInput{
+		QueueUrl:       &p.urlEventos,
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	}
+	if _, err := p.api.GetQueueAttributes(ctx, entrada); err != nil {
+		if errosDeFilaInexistente(err) {
+			return fmt.Errorf("%w: %s", ErrFilaInexistente, p.urlEventos)
+		}
+		return fmt.Errorf("sqs: fila de eventos: %w", err)
 	}
 	return nil
 }

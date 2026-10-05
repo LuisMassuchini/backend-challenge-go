@@ -312,6 +312,49 @@ em replay do resultado persistido.
 espero o outro, e e o que permite recuperar trabalho abandonado depois de uma
 interrupcao.
 
+**A chave de particao da saida e o `aggregateId` do evento.** Esta era uma das duas
+decisoes que o plano mandava fechar antes de codar o relay, e ela e do agregado e
+nao da carteira nem do provedor pelo motivo seguinte: o agregado ja e o dado que
+ordena os fatos. `WagerTransactionProcessed` tem agregado igual ao
+`transactionId`, e `WalletBalanceChanged` tambem -- os dois eventos de uma operacao
+tem o mesmo agregado, entao a FIFO garante que o consumidor ve "operacao processada"
+antes de "saldo alterado", que e a ordem em que os fatos aconteceram.
+
+Escolher a carteira exigiria denormalizar `wallet_id` na `outbox_events` e preenche-la
+em todo `INSERT`, para chegar ao mesmo resultado por um caminho mais longo: a carteira
+e a mesma para todos os eventos do agregado, entao a chave por agregado e mais estreita
+e nao perde nenhuma ordem que a chave por carteira conservaria. Escolher a fila
+inteira serializaria todas as publicacoes do sistema em uma so.
+
+**A ordem entre agregados diferentes nao e preservada, e isso e uma decisao, nao uma
+lacuna.** Com `SKIP LOCKED`, dois relays pegam lotes disjuntos em paralelo e a ordem
+entre eles depende de qual-pega-o-que. Um `WalletBalanceChanged` da carteira A pode
+chegar ao consumidor depois do `WagerTransactionProcessed` da carteira B. Isso e
+aceitavel porque os dois eventos descrevem agregados independentes: o consumidor que
+mantem estado por agregado precisa so de ordem *dentro* do agregado, que a chave de
+particao garante. Um consumidor que Precisa de uma ordem global entre carteiras
+precisa de um sequenciador, e o `occurredAt` do envelope e o que existe para isso.
+
+**A deduplicacao do broker nao e o que garante idempotencia do evento.** A
+`MessageDeduplicationId` leva o `eventId`, e a deduplicacao por conteudo fica
+desligada como na fila de entrada. A razao e a mesma: a janela do SQS e de cinco
+minutos, e uma republicacao por falha entre publicar e confirmar pode acontecer muito
+depois. O `eventId` e gerado na escrita da outbox e sobrevive a republicacao, entao o
+consumidor reconhece o mesmo evento pelo contrato -- e nao por uma janela do broker que
+ele nao controla.
+
+**A fila de saida e separada da fila de entrada.** `wager-events.fifo` recebe envelope
+de evento; `wager-transactions.fifo` recebe comando de jogo. Publicar evento na fila
+de operacoes entregaria ao consumidor de operacoes algo que ele nao sabe ler, e a
+falha apareceria como mensagem malformada em vez de como problema de topologia.
+
+**Um evento que esgota as tentativas nao e apagado: e marcado como falha permanente**,
+com `failed_at` e `failure_reason`, e deixa de ser retomado. Descartar resolveria o
+laco, mas apagar evento perderia a evidencia de que ele existiu e nao foi publicado --
+e o papel de runtime nao tem `DELETE`, a mesma garantia que protege o ledger. O
+registro continua no banco e o motivo fica legivel para o operador decidir. E a mesma
+forma de desfecho que a referencia que nunca chega, na transacao.
+
 ---
 
 ## Pendencias registradas
@@ -319,10 +362,10 @@ interrupcao.
 As decisoes abaixo ainda nao foram fechadas e precisam ser registradas aqui no
 momento em que forem:
 
-- `statement_timeout` e `lock_timeout` do pool: com contencao, a transacao deve
-  falhar rapido em vez de segurar a requisicao.
+- `statement_timeout` e `lock_timeout` do pool: fechados na E7, 3s e 1s no papel de
+  runtime.
 - `MessageGroupId`, `MessageDeduplicationId`, visibility timeout, receive count e
-  limite de tentativas: a serializacao e a deduplicacao no broker nao podem ficar
-  implicitas.
-- Chave de particionamento e ordenacao da outbox: e o que decide se `SKIP LOCKED`
-  publica em ordem.
+  limite de tentativas: fechados na E13 para a fila de entrada e na E15 para a fila de
+  saida. Registrados nas secoes "Inbox e outbox" e "Mensageria".
+- Chave de particionamento e ordenacao da outbox: fechada na E15, e o `aggregateId`.
+  Ver a secao "Inbox e outbox".
