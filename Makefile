@@ -127,6 +127,33 @@ run: ## Sobe a aplicacao
 shell-docker: ## Abre um shell na imagem oficial do Go, com o repo montado
 	MSYS_NO_PATHCONV=1 docker run --rm -it -v "$(CURDIR):/src" -w /src $(GO_IMAGE) sh
 
+##@ Carga
+
+# O k6 roda DENTRO da rede do Compose, e nao na maquina. Um `k6` no host
+# alcancando `localhost:8080` atravessa o Docker Desktop, e a latencia medida seria a
+# do proxy do Docker e nao a do servico. A rede e a `wager-service_default`, que o
+# Compose cria pelo `name:` do arquivo.
+#
+# A versao da imagem e fixada por patch, como as demais do projeto: `k6:latest`
+# muda de comportamento entre versoes e um numero de carga so e comparavel com a
+# mesma versao.
+CARGA_IMAGEM ?= grafana/k6:0.54.0
+CARGA_THREADS ?= 30
+CARGA_CARTEIRAS ?= 20
+CARGA_DURACAO ?= 60s
+
+carga: ## Executa a carga contra o Compose (sobe o container do k6)
+	MSYS_NO_PATHCONV=1 docker run --rm --network wager-service_default \
+	  -v "$(CURDIR)/tests/carga:/carga:ro" \
+	  -e K6_BASE_URL=http://wager-service:8080 \
+	  -e CARGA_THREADS=$(CARGA_THREADS) \
+	  -e CARGA_CARTEIRAS=$(CARGA_CARTEIRAS) \
+	  -e CARGA_DURACAO=$(CARGA_DURACAO) \
+	  $(CARGA_IMAGEM) run /carga/carga.js
+
+carga-metricas: ## Le o /metrics e imprime as faixas de p50, p95 e p99 do servidor
+	$(GO) run ./cmd/metricas http://localhost:8080/metrics
+
 ##@ Limpeza
 
 clean: ## Remove artefatos locais

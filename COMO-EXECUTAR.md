@@ -565,6 +565,34 @@ efemeras e nao depende do servico do Compose -- e ela **precisa** subir o Compos
 o PostgreSQL, o SQS e o Keycloak no ar. `migrate`, `postgres`, `localstack` e `keycloak`
 podem ficar de pe durante a integracao; so `wager-service` atrapalha.
 
+### Carga
+
+O relatorio completo, com ambiente, metodologia e resultados medidos, esta em
+[`docs/carga.md`](docs/carga.md).
+
+```sh
+docker compose up -d --build
+make carga
+make carga-metricas
+```
+
+O `k6` roda **dentro da rede do Compose**, falando com `wager-service:8080`. Nao e
+detalhe: um `k6` na maquina alcancando `localhost:8080` atravessa o Docker Desktop, e a
+latencia medida seria a do proxy do Docker, e nao a do servico.
+
+Os parametros sao variaveis de ambiente:
+
+```sh
+make carga CARGA_THREADS=50 CARGA_CARTEIRAS=10 CARGA_DURACAO=120s
+```
+
+O pool de carteiras pequeno e deliberado: e a contensao pelo lock da carteira que o
+`lock_timeout` existe para exercitar, e ela so aparece quando duas requisicoes disputam o
+mesmo dinheiro.
+
+O `make carga` exige o `wager-service` de pe. O contrario vale para a integracao, que
+precisa dele **parado** para nao competir pela fila.
+
 ### Rodrigues de integracao
 
 ```sh
@@ -627,6 +655,7 @@ processo esta fora, a mensagem fica invisivel para os demais e volta depois.
 | Arquivo | Para que |
 |---|---|
 | `ARCHITECTURE.md` | decisoes com por que e custo |
+| `docs/carga.md` | relatorio de carga: ambiente, metodologia e resultado medido |
 | `docs/auditoria.md` | matriz de evidencia contra o enunciado, e as lacunas |
 | `docs/ambiente.md` | detalhe do ambiente, credenciais e diagnostico |
 | `docs/banco.md` | as oito migrations, uma a uma |

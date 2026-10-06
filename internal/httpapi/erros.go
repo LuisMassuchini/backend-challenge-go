@@ -194,6 +194,31 @@ func classificarErro(err error) (int, respostaErro) {
 			CodigoDeFalha: string(wagering.CodigoFalhaSemSaldo),
 		}
 
+	case errors.Is(err, pg.ErrConflitoDeVersao):
+		// Disputa de concorrencia: ou o `SELECT ... FOR UPDATE` esperou alem do
+		// `lock_timeout` de um segundo, ou a atualizacao condicional nao atingiu
+		// nenhuma linha porque outra transacao mudou a carteira antes.
+		//
+		// E 503 e nao 500 porque o servidor esta inteiro e a operacao nao foi tentada
+		// pela metade: repetir com a mesma chave e seguro, e e o que o provedor faz.
+		//
+		// O 500 aqui era um defeito de contrato, e um defeito caro: o enunciado pede
+		// que indisponibilidade transitoria seja distinguivel das demais situacoes, e o
+		// `lock_timeout` existe justamente para transformar contencao em falha rapida e
+		// repetivel. Devolver 500 punia o cliente por uma contencao que e o
+		// comportamento esperado -- e 500 e o codigo que provedor costuma NAO repetir,
+		// justamente porque significa "o erro e meu". O `lock_timeout` virava um buraco
+		// onde a transacao se perdia.
+		//
+		// Descoberto pela carga: a 152 requisicoes por segundo com pool de carteiras
+		// pequeno, 34 das requisicoes receberam 500 com `SQLSTATE 55P03` no corpo --
+		// e nenhuma delas tinha sido aplicada.
+		return http.StatusServiceUnavailable, respostaErro{
+			Erro:    "indisponivel",
+			Codigo:  http.StatusServiceUnavailable,
+			Detalhe: "disputa de concorrencia pela carteira; repetir e seguro quando a operacao tem chave de idempotencia",
+		}
+
 	case errors.Is(err, pg.ErrInvarianteViolada):
 		// O banco recusou o que o codigo pediu. Isso e falha nossa, nao do cliente.
 		return http.StatusInternalServerError, respostaErro{
