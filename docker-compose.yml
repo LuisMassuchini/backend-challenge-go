@@ -91,6 +91,27 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${WAGER_KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${WAGER_KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HEALTH_ENABLED: "true"
+
+      # O hostname e fixado de proposito, e sem isso o issuer muda com o ponto de entrada.
+      #
+      # Por padrao o Keycloak deriva o `iss` do token do header Host da requisicao. Pedido
+      # de `localhost:8081` produz token com `iss=http://localhost:8081/realms/wager`;
+      # pedido de dentro da rede do Compose, de `keycloak:8080`, produz
+      # `iss=http://keycloak:8080/realms/wager`. Sao realm e chave os mesmos, e o token e
+      # valido em um dos caminhos e recusado no outro.
+      #
+      # Isso nao e hipotese: foi o que aconteceu na primeira execucao de carga, com o k6
+      # dentro da rede e o `wager-service` validando o issuer externo. A falha aparecia
+      # como `401 credencial_invalida`, que e o mesmo codigo de um token de verdade
+      # invalido.
+      #
+      # Fixar o hostname faz o `iss` ser sempre o mesmo, de onde o token for pedido. E
+      # `hostname-strict=false` porque o pedido ainda precisa ser aceito com Host
+      # `keycloak:8080` -- o que o k6 e qualquer outro cliente na rede usam. O
+      # `WAGER_OIDC_URL_JWKS` continua sendo a unica parte do OIDC que precisa de endereco
+      # interno.
+      KC_HOSTNAME: http://${WAGER_KEYCLOAK_HOST:-localhost}:${WAGER_KEYCLOAK_PORT:-8081}
+      KC_HOSTNAME_STRICT: "false"
     ports:
       - "${WAGER_KEYCLOAK_PORT:-8081}:8080"
     volumes:
