@@ -601,7 +601,85 @@ forma de desfecho que a referencia que nunca chega, na transacao.
 
 ---
 
-## Pendencias registradas
+## Limitacoes
+
+O enunciado pede limites explicitos, interpretacoes adotadas e trabalho nao concluido.
+Esta secao e a lista; cada item diz o que e, o que custa e o que aconteceria se fosse feito.
+
+### Trabalho nao concluido
+
+**Ledger de partidas dobradas.** O enunciado diz que e opcional. Nao implementado, e nao
+ha codigo preparado para ele -- o `wallet_ledger_entries` nao tem chave de partida, e
+adicionar uma e uma migration que muda a unicidade de `(walletId, transactionId)` para
+`(walletId, gameId, roundId)`. Nao foi feito porque a mudanca mexe na garantia central do
+ledger e nao compra eliminatorio.
+
+**Consumidor de demonstracao da fila de eventos.** O relay publica em
+`wager-events.fifo` e ninguem le. O contrato de consumo esta documentado, e nenhum leitor
+o exercita. O que falta e um processo que consuma e registre o que viu, para que a
+publicacao seja observavel de ponta a ponta e nao so pelo contador de metricas.
+
+**`fx.Module`.** Decisao, e nao esquecimento. O grafo usa `fx.Provide` e `fx.Invoke` com
+injeao por construtores, que e o que o enunciado exige; `fx.Module` seria agrupamento
+cosmetico em um grafo de tres workers. Ver a secao "Composicao com Fx".
+
+### Coluna morta
+
+**`inbox_messages.attempts`** foi criada com o comentario "conta as reentregas" e nunca e
+incrementada -- `Registrar` usa `ON CONFLICT DO NOTHING` e nao tem como atualizar o valor
+de uma linha que ja existe. O valor fica sempre em `1`, que e o default.
+
+Duas fontes de dado para o mesmo fato: a coluna, e o `ApproximateReceiveCount` da propria
+fila. **Enquanto a coluna estiver morta, ninguem deve le-la** para decidir se uma mensagem
+precisa de reprocessamento: ela diz que houve uma entrega quando houve duas.
+
+A correcao exige decidir a semantica antes de escrever a migration: incrementar so quando
+o `INSERT` conflita, ou incrementar em toda entrega? A primeira preserva "recebimentos" e
+custa um `UPDATE` separado; a segunda muda o significado da coluna e passa a contar a
+primeira entrega, que nao e reentrega. Fica registrado em `docs/auditoria.md`, secao 6.3.
+
+### Limitacoes medidas
+
+**Uma instancia da aplicacao na medicao de carga.** O Compose fixa a porta 8080 e
+`--scale` falha ao compartilhar porta publicada. Medir com tres instancias exige tirar
+`ports` do servico ou subir instancias na mao com `WAGER_HTTP_ADDRESS` diferente. As duas
+mudam a topologia e por isso nao foram feitas. Ver `docs/carga.md`, secao 2.
+
+**Atraso da outbox de ate 76 segundos sob carga.** O relay publica em lote de 50 e
+**sequencialmente**, e o LocalStack leva cerca de 2,8 ms por publicacao -- o relay satura
+em ~357 eventos por segundo neste ambiente. Com o produtor acima disso, o atraso cresce.
+Duas mudancas o resolveriam: publicar o lote em paralelo, e um relay por agregado. As duas
+nao foram feitas.
+
+**A regra de recusa tranca a carteira antes de recusar.** Sob carga, `REJECTED` custa
+37 ms contra 6 ms de `PROCESSED`. A regra precisa do saldo, e o saldo esta protegido pelo
+`SELECT ... FOR UPDATE`. Um caminho que lesse o saldo sem lock e revalidasse sob lock
+resolveria, ao custo de um `SELECT` a mais em toda operacao -- troca de latencia por
+corretude, e a medicao mostra que a troca nao esta clara.
+
+**Sem execucao longa.** A carga dura 85 segundos. Nao ha medicao de vazamento de recurso
+nem de degradacao ao longo de horas, e as duas coisas que aparecem primeiro em um sistema
+que vaza sao a memoria do processo e o crescimento da outbox.
+
+### Interpretacoes adotadas
+
+**`LOSS` com valor diferente de zero e recusa, e nao valor zero.** O enunciado diz que
+`LOSS` exige `money.amount` igual a `"0.00"`. O sistema recusa o valor diferente em vez de
+trata-lo como zero, porque aceitar significaria um pedido que o cliente fez e o servidor
+ignorou.
+
+**Reversao sem saldo suficiente e recusada com codigo proprio.** O enunciado pede codigo
+diferente do da `BET` sem saldo, e o motivo e que a providencia do cliente e outra: a
+`BET` espera deposito, a reversao espera o estorno parar. Ver `wagering.CodigoFalha`.
+
+**O `walletId` da abertura e gerado pelo servidor.** O `playerId` vai no corpo e o `id`
+volta na resposta. Aceitar um `walletId` do cliente e confiar nele seria aceitar que a
+abertura depende de um identificador que o cliente pode ter escolhido.
+
+**Mensagem malformada sai da fila, e nao volta.** Reentregar um corpo que o produtor
+mandou errado repete o erro um numero limitado de vezes e so chega a cartao morto. O
+criterio e: o que o produtor controla de forma permanente e o que so se corrige com nova
+tentativa sao caminhos diferentes, e a inbox do consumidor trata os dois.
 
 As decisoes abaixo ainda nao foram fechadas e precisam ser registradas aqui no
 momento em que forem:
