@@ -43,6 +43,20 @@ type Dependencias struct {
 	// responderia 200 com um corpo vazio, e quem scrapeia leria "nenhuma metrica" --
 	// que e indistinguivel de "o processo esqueceu de medir".
 	Metricas *obs.Registro
+
+	// MetricasConhecidas e o conjunto nomeado, que o middleware de cronometragem usa
+	// para observar a latencia da requisicao.
+	//
+	// E separado de `Metricas` porque as duas coisas respondem perguntas diferentes.
+	// `*obs.Registro` e o armazenamento generico: ele guarda o que for registrado e
+	// conhece os nomes so como texto. `*obs.Metricas` e quem sabe que existe
+	// `wager_requisicao_duracao_ms` e quais rotulos ele aceita. Colocar as duas em um
+	// campo so obrigaria o middleware a localizar a serie pelo nome -- e a procurar por
+	// texto o caminho mais facil de errar sem erro nenhum.
+	//
+	// Nil desliga a observacao, e e o estado dos testes que montam o handler sem
+	// registro.
+	MetricasConhecidas *obs.Metricas
 }
 
 // NovoServidor monta o servidor e as rotas.
@@ -104,7 +118,7 @@ func NovoRoteador(d Dependencias) http.Handler {
 		rotas.Handle(padrao, autenticar(d, handler))
 	}
 
-	return comMiddlewares(rotas)
+	return comMiddlewares(rotas, d.MetricasConhecidas)
 }
 
 // metricas expoe as metricas no formato de texto do Prometheus.

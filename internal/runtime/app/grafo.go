@@ -158,6 +158,7 @@ func construirServidorHTTP(
 	validador *auth.Validador,
 	pronto prontidaoE,
 	registro *obs.Registro,
+	metricas *obs.Metricas,
 ) *http.Server {
 
 	deps := httpapi.Dependencias{
@@ -167,6 +168,11 @@ func construirServidorHTTP(
 		// nao existe, e uma rota que nao existe devolve 404 -- que e uma resposta
 		// diferente de "existe e esta vazia", e o Prometheus precisa da segunda.
 		Metricas: registro,
+		// O conjunto nomeado vai alem do registro: e ele que o middleware de
+		// cronometragem usa para publicar a latencia da requisicao. Sem este campo a
+		// serie `wager_requisicao_duracao_ms` ficaria declarada e nunca observada --
+		// declarado sem writer e o jeito mais silencioso de uma metrica nao existir.
+		MetricasConhecidas: metricas,
 	}
 	// O validador entra como ponte, e nao como ponteiro, porque o roteador decide o
 	// que fazer quando ele e nil e um ponteiro nil dentro de uma interface nao e

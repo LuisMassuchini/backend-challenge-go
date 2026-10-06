@@ -4,16 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/LuisMassuchini/backend-challenge-go/internal/app"
 	"github.com/LuisMassuchini/backend-challenge-go/internal/auth"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/obs"
+	"github.com/LuisMassuchini/backend-challenge-go/internal/pg"
 )
 
 // validadorFixo e um validador que devolve um ator sem consultar IdP.
@@ -217,7 +221,9 @@ func TestPanicVira500(t *testing.T) {
 	rotas.HandleFunc("GET /explodir", func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	})
-	h := comMiddlewares(rotas)
+	// Nil no conjunto de metricas e o estado de quem monta o handler sem registro: a
+	// cronometragem continua medindo para o log e nao publica nada.
+	h := comMiddlewares(rotas, nil)
 
 	gravador := httptest.NewRecorder()
 	h.ServeHTTP(gravador, httptest.NewRequest(http.MethodGet, "/explodir", nil))
@@ -277,6 +283,21 @@ func TestTraducaoDeErrosFixaOContratoDeStatus(t *testing.T) {
 			esperado: http.StatusAccepted,
 			codigo:   "regra_de_negocio_recusou",
 		},
+		"disputa de concorrencia": {
+			// O `lock_timeout` de um segundo e o que transforma contencao em falha
+			// rapida e repetivel, e 503 e o status que diz "repita". Com 500, o
+			// provedor costuma NAO repetir -- 500 significa "o erro e meu" -- e a
+			// transacao se perdia sem nunca ter sido aplicada.
+			//
+			// Este caso entrou na tabela depois da carga, e nao antes: em
+			// `tests/integration` nao ha contensao o bastante para esbarrar no
+			// `lock_timeout`, entao o caminho so aparecia sob carga.
+			erro: fmt.Errorf("%w: lock nao disponivel: %w",
+				pg.ErrConflitoDeVersao,
+				errors.New(`ERROR: canceling statement due to lock timeout (SQLSTATE 55P03)`)),
+			esperado: http.StatusServiceUnavailable,
+			codigo:   "indisponivel",
+		},
 		"erro interno": {
 			erro:     errors.New("qualquer"),
 			esperado: http.StatusInternalServerError,
@@ -297,6 +318,23 @@ func TestTraducaoDeErrosFixaOContratoDeStatus(t *testing.T) {
 				t.Errorf("status no corpo e %d e no transporte %d", corpo.Codigo, status)
 			}
 		})
+	}
+}
+
+// O corpo da indisponibilidade transitoria tem de dizer que repetir e seguro.
+//
+// E o que o enunciado pede ao pedir que indisponibilidade transitoria seja
+// distinguivel: sem essa frase no corpo, o provedor tem 503 na mao e nenhuma base para
+// decidir entre repetir e desistir. A garantia de que repetir e seguro vem da chave de
+// idempotencia, e e o corpo quem leva essa informacao ate o cliente.
+func TestIndisponibilidadeTransitoriaDizQueRepetirESeguro(t *testing.T) {
+	_, corpo := classificarErro(fmt.Errorf("%w: lock nao disponivel", pg.ErrConflitoDeVersao))
+
+	if !strings.Contains(corpo.Detalhe, "repetir") {
+		t.Errorf("o corpo da indisponibilidade nao orienta o cliente: detalhe %q", corpo.Detalhe)
+	}
+	if !strings.Contains(corpo.Detalhe, "idempotencia") {
+		t.Errorf("o corpo nao diz POR QUE repetir e seguro: detalhe %q", corpo.Detalhe)
 	}
 }
 
@@ -496,4 +534,91 @@ func (errDeNaoEncontrado) Error() string { return "nao encontrado" }
 
 func (errDeNaoEncontrado) Is(alvo error) bool {
 	return alvo != nil && alvo.Error() == "pg: registro nao encontrado"
+}
+
+// ---------------------------------------------------------------------------
+// A metrica de latencia de requisicao tem writer
+// ---------------------------------------------------------------------------
+
+// A serie `wager_requisicao_duracao_ms` foi declarada na E16 e nunca observada: existia
+// no registro, aparecia no `/metrics` como histograma vazio, e ninguem percebia porque
+// um histograma declarado e nunca observado tem a mesma forma de um que nao existe.
+//
+// A forma do defeito e a mesma da `Inbox.Concluir`: um produtor declarado e sem writer.
+// `go vet` nao acusa isso, e a suite passava. Por isso o teste verifica que a metrica
+// recebe a observacao -- e nao que o handler responde, que ja era coberto.
+func TestCronometrarPublicaALatenciaDaRequisicao(t *testing.T) {
+	registro := obs.NovoRegistro()
+	metricas := obs.NovasMetricas(registro)
+
+	rotas := http.NewServeMux()
+	rotas.HandleFunc("POST /operacao", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	h := comMiddlewares(rotas, metricas)
+
+	requisicao := httptest.NewRequest(http.MethodPost, "/operacao", nil)
+	registrador := httptest.NewRecorder()
+	h.ServeHTTP(registrador, requisicao)
+
+	exposto := registro.Expor()
+
+	// O `_count` e o que prova que houve observacao. Procurar pelo nome do histograma
+	// sem o `_count` passaria mesmo com a serie vazia, que era exatamente o estado que
+	// passou despercebido.
+	if !strings.Contains(exposto, `wager_requisicao_duracao_ms_count{metodo="POST"} 1`) {
+		t.Errorf("a latencia da requisicao nao foi observada.\nExposto:\n%s", exposto)
+	}
+	if !strings.Contains(exposto, `wager_requisicao_duracao_ms_bucket{metodo="POST",le="+Inf"} 1`) {
+		t.Errorf("o bucket infinito da latencia nao foi observado.\nExposto:\n%s", exposto)
+	}
+}
+
+func TestCronometrarMedeEmilliseconds(t *testing.T) {
+	registro := obs.NovoRegistro()
+	metricas := obs.NovasMetricas(registro)
+
+	rotas := http.NewServeMux()
+	rotas.HandleFunc("GET /lento", func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(30 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := comMiddlewares(rotas, metricas)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/lento", nil))
+
+	// O teste verifica a UNIDADE, e nao que a duracao e exatamente trinta: medir tempo
+	// num teste faz o teste depender da maquina.
+	//
+	// A discriminacao e pelos buckets, e ela depende de os valores serem CUMULADOS --
+	// como o Prometheus escreve. Se a unidade registrada fosse segundos, 0,03 cairia em
+	// `le="5"`; em milissegundos cai em `le="50"` e deixa `le="5"` zerado. Os dois
+	// together e que fecham a prova, porque qualquer um deles sozinho passa numa metade
+	// dos casos.
+	if !strings.Contains(registro.Expor(), `wager_requisicao_duracao_ms_bucket{metodo="GET",le="5"} 0`) {
+		t.Errorf("uma requisicao de 30ms nao deveria caber em 5ms: a unidade registrada nao parece ser milissegundo.\nExposto:\n%s",
+			registro.Expor())
+	}
+	if !strings.Contains(registro.Expor(), `wager_requisicao_duracao_ms_bucket{metodo="GET",le="50"} 1`) {
+		t.Errorf("uma requisicao de 30ms deveria caber no bucket de 50ms.\nExposto:\n%s",
+			registro.Expor())
+	}
+}
+
+func TestCronometrarSemConjuntoDeMetricasNaoQuebra(t *testing.T) {
+	// Nil e o estado dos testes que montam o handler sem registro. Se o middleware
+	// dereferenciasse nil aqui, o teste de panic deixaria de testar panic e passaria a
+	// testar nil-pointer -- que e um caminho diferente com o mesmo sintoma.
+	rotas := http.NewServeMux()
+	rotas.HandleFunc("GET /ok", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := comMiddlewares(rotas, nil)
+
+	registrador := httptest.NewRecorder()
+	h.ServeHTTP(registrador, httptest.NewRequest(http.MethodGet, "/ok", nil))
+
+	if registrador.Code != http.StatusOK {
+		t.Errorf("status %d sem conjunto de metricas, esperado 200", registrador.Code)
+	}
 }

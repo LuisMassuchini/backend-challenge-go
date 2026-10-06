@@ -162,17 +162,27 @@ func recuperar(proximo http.Handler) http.Handler {
 // A correlacao vem do contexto e nao do cabecalho lido de novo: o `comCorrelacao` ja
 // a colocou no contexto, e reler o cabecalho aqui arriscaria a linha citar uma
 // correlacao diferente da que foi para o handler.
-func cronometrar(proximo http.Handler) http.Handler {
+func cronometrar(proximo http.Handler, metricas *obs.Metricas) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		inicio := time.Now()
 		registrador := &registradorDeStatus{ResponseWriter: w}
 		proximo.ServeHTTP(registrador, r)
 
+		duracao := time.Since(inicio)
+
+		// A metrica e observada aqui, e nao dentro de um `defer`, para que a medicao e o
+		// log abaixo sejam medidos a partir do MESMO instante. Com um `defer`, o log sairia
+		// com uma duracao e a metrica com outra, e a diferenca -- pequena, mas real -- e
+		// o tipo de incoerencia que ninguem encontra olhando numero de teto.
+		if metricas != nil {
+			metricas.LatenciaRequisicao.Observe(float64(duracao.Milliseconds()), "metodo", r.Method)
+		}
+
 		obs.Log(obs.De(r.Context())).Info("requisicao atendida",
 			"metodo", r.Method,
 			"caminho", r.URL.Path,
 			"status", statusGravado(registrador),
-			obs.Duracao("duracao_ms", time.Since(inicio).Milliseconds()),
+			obs.Duracao("duracao_ms", duracao.Milliseconds()),
 		)
 	})
 }
@@ -234,6 +244,6 @@ func statusGravado(w http.ResponseWriter) int {
 //
 // A autenticacao e a mais interna de todas, para que so o trabalho autenticado entre
 // no log de negocio.
-func comMiddlewares(proximo http.Handler) http.Handler {
-	return recuperar(comCorrelacao(cronometrar(proximo)))
+func comMiddlewares(proximo http.Handler, metricas *obs.Metricas) http.Handler {
+	return recuperar(comCorrelacao(cronometrar(proximo, metricas)))
 }
