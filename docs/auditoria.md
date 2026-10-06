@@ -7,9 +7,10 @@ Ele nao e um resumo do que ja foi feito. E a lista do que **falta**, com a mesma
 pergunta que um avaliador faz: "onde esta a prova?" -- e, quando a prova nao esta,
 "por que nao esta?".
 
-**Estado na auditoria:** 49 commits ate a E20, `make verify` e `make test-race-docker`
-verdes, treze pacotes de integracao verdes, dezesseis cenarios de E2E e dez de consumidor
-contra a fila real.
+**Estado na auditoria:** 53 commits ate a E21. A documentacao final ainda nao rodou.
+`make verify` e `make test-race-docker` verdes, treze pacotes de integracao verdes,
+dezesseis cenarios de E2E, dez de consumidor contra a fila real, e uma carga de 179
+operacoes por segundo com trinta threads.
 
 ---
 
@@ -19,10 +20,10 @@ contra a fila real.
 |---|---:|---:|
 | Eliminatorios cumpridos | 10 de 10 | 10 de 10 |
 | Cenarios do enunciado | 10 de 12 | **12 de 12** |
-| Defeitos reais encontrados | -- | **3** |
+| Defeitos reais encontrados | -- | **5** |
 | Criterios com evidencia integral | 6 de 8 | **8 de 8** |
 
-**Os tres defeitos, e o que eles tinham em comum.**
+**Os cinco defeitos, e o que eles tinham em comum.**
 
 O **primeiro** so apareceu com reversao em processo real. A migration 00005 proibia nota de
 falha de retomada em `PROCESSED`, com o argumento de que uma operacao bem-sucedida nao
@@ -39,16 +40,27 @@ faltava uma garantia que o enunciado pede explicitamente. Secao 6.2.
 O **terceiro** nao e bug, e uma decisao que ninguem tomou: a coluna `attempts` da inbox
 documenta "conta as reentregas" e nunca e incrementada. Secao 6.3.
 
-**O que eles tem em comum:** os tres estavam em lugares que **ninguem testava**. A
-constraint nova nunca exercitou o caminho da retomada com sucesso. O `UPDATE` da inbox
-nunca foi chamado, so o `INSERT`. A coluna `attempts` nao tem writer nem reader. **Nenhum
-dos tres apareceria em revisao de codigo, e os tres apareceram assim que alguem olhou o
-estado depois de um caminho feliz.**
+O **quarto** so aparece com concorrencia **sustentada**. O `lock_timeout` de um segundo
+devolvia **500** em vez de 503 -- e o app reconhecia o conflito, contava na metrica e
+devolvia o erro cru. Com 500, o provedor recebe o codigo que significa "o erro e meu" e
+tipicamente nao repete: a transacao se perdia sem nunca ter sido aplicada. Secao 6.4.
+
+O **quinto** e o mais silencioso. O `created_at` do lancamento era medido **antes** do
+`SELECT ... FOR UPDATE`, e a trigger deferida que confere o encadeamento do ledger ordena
+por ele. O carimbo refletia a ordem de chegada, e nao a de serializacao: uma requisicao
+que entrava depois e pegava o lock antes gravava um carimbo menor, e a trigger recusava a
+transacao. Secao 6.5.
+
+**O que os cinco tem em comum:** os tres primeiros estavam em lugares que **ninguem
+testava** -- constraint nova nunca exercitada, `UPDATE` nunca chamado, coluna sem writer.
+Os dois ultimos estavam em **caminhos que a suite exercita mas nunca sob pressao**: a
+traducao de erro tem teste para deadline e nao para conflito de lock, e a trigger de
+encadeamento so falha com ordem invertida, que uma rajada de concorrencia produz raramente.
+Nenhum apareceria em revisao de codigo.
 
 O padrao que a auditoria registra: um teste que verifica o **estado** depois do caminho
-feliz encontra defeitos que um teste que verifica o **resultado** nao encontra. O saldo
-estava certo em todos os casos; o que nao existia era a distincao entre "tratado" e
-"orfao".
+feliz encontra defeitos que um teste que verifica o **resultado** nao encontra, e uma
+medicao sob carga encontra defeitos que uma suite com passar/falhar nao encontra.
 
 ---
 
@@ -360,7 +372,59 @@ primeira -- mudaria o significado da coluna. E o dado ja existe em outro lugar: 
 Enquanto a coluna estiver morta, **ninguem deve le-la** para decidir se uma mensagem
 precisa de reprocessamento: ela diz que houve uma entrega quando houve duas.
 
-### 6.4 Onde a auditoria mudou o codigo alem dos defeitos
+### 6.4 O lock timeout devolvia 500 em vez de 503
+
+**Sintoma:** a 152 requisicoes por segundo, 34 delas receberam 500 com
+`canceling statement due to lock timeout (SQLSTATE 55P03)` no corpo. Nenhuma tinha sido
+aplicada, e nenhuma seria.
+
+**Causa:** `classificarErro` traduzia deadline de contexto para 503, mas nao o conflito
+de lock. `pg.ErrConflitoDeVersao` existia, era devolvido pelo repositorio de carteira e
+nao era classificado -- caia no 500 padrao.
+
+**Por que era caro.** O `lock_timeout` de um segundo existe para transformar contencao em
+falha rapida e repetivel. Com 500, o provedor recebe o codigo que significa "o erro e
+meu" e tipicamente **nao repete** -- a transacao se perdia. Com 503 e um corpo que diz
+que repetir e seguro, a idempotencia faz o resto. O `lock_timeout` estava fazendo o
+trabalho dele e o resultado era desperdiçado: a contencao virava uma transacao
+abandonada em vez de uma repeticao barata.
+
+**Por que a integracao nao pegou:** para esbarrar no `lock_timeout` de um segundo e
+preciso que mais requisicoes disputem a mesma carteira do que o pool absorve. A E2E faz
+isso com 50 envios, mas no mesmo instante -- e contencao de uma rajada e muito menor que
+de uma carga sustentada.
+
+**Correcao:** caso em `classificarErro` para `pg.ErrConflitoDeVersao`, com 503 e corpo
+que diz que repetir e seguro. A tabela de traducao tem agora o caso, e o teste entrou na
+tabela existente -- e ele ganha um comentario dizendo que so a carga produz a condicao.
+
+### 6.5 `created_at` do lancamento media a ordem errada
+
+**Sintoma:** duas requisicoes em uma rodada receberam 500 com
+`lancamento nao encadeia com o anterior: saldo anterior 87400, anterior 87000`.
+
+**Causa:** a trigger `trg_ledger_coerente_na_carteira` e **deferida** e ordena a cadeia
+por `(created_at, id)`. O instante do lancamento era medido na entrada do caso de uso,
+**antes** do `SELECT ... FOR UPDATE`. O carimbo refletia a ordem de chegada, e nao a de
+serializacao: uma requisicao que entrava depois e consequentava o lock antes -- por estar
+esperando conexao do pool -- gravava um `created_at` menor, e a trigger procurava o
+predecessor errado.
+
+Nao era dinheiro errado: a constraint recusava a transacao inteira e a operacao se
+perdia, com a garantia financeira ainda valendo.
+
+**Correcao:** medir o instante depois do lock, dentro de `resolver`. Quem grava depois leu
+o saldo depois, entao o carimbo e posterior. A ressalva -- relogio andando para tras
+entre as medicoes -- preferiria falha barulhenta a lancamento fora de ordem, que e o que
+a trigger faz.
+
+**Depois da correcao, nenhuma ocorrencia em tres rodadas de carga.**
+
+**O que a trigger estava certa em fazer:** recusar. O defeito nao era a constraint; era o
+carimbo. Uma constraint de encadeamento etao forte que pode denunciar um bug de ordem que
+a aplicacao cometera, e e por isso que ela vale a pena mesmo custando uma operacao.
+
+### 6.6 Onde a auditoria mudou o codigo alem dos defeitos
 
 **`internal/obs/metrica.go` passou a explicar por que usa `float64`.** Detalhado na
 secao 1: o eliminatorio 3 e "dinheiro nao pode passar por `float64`", a busca por essa
@@ -385,6 +449,12 @@ contagem e duracao.
 | `internal/sqs/sqs.go` e `internal/runtime/app/consumidor.go`: remocao de `EsperaMaxima` | Campo morto que prometia controlar o long polling e nao controlava |
 | `consumidorteste/consumidor_test.go`: cenario 5 | Fechar 5.1: reentrega depois do commit |
 | `tests/integration/ciclo/ciclo_test.go`: comentario orfao removido | O arquivo terminava no meio de um doc comment sem funcao |
+| `docker-compose.yml`: `KC_HOSTNAME` fixado | O issuer do token mudava com o ponto de entrada, e o token valia em um caminho e nao no outro |
+| `tests/carga/carga.js` + `internal/promtexto/` + `cmd/metricas/` | Relatorio de carga, com p50/p95/p99 do servidor |
+| `internal/httpapi/erros.go`: `ErrConflitoDeVersao` para 503 | Defeito 6.4: lock timeout devolvia 500 |
+| `internal/app/processar_operacao.go`: instante do lancamento depois do lock | Defeito 6.5: `created_at` media a ordem de chegada |
+| `internal/httpapi/`: `LatenciaRequisicao` observada | Metrica declarada e nunca observada, como `Inbox.Concluir` |
+| `docs/carga.md` | O relatorio, com o resultado medido |
 | `docs/auditoria.md` | Este arquivo |
 
 ---
@@ -399,8 +469,13 @@ contagem e duracao.
 2. **A coluna `attempts` da inbox** -- ver 6.3. Decisao a tomar, nao bug a corrigir: ou
    ganha semantica de reentrega, ou sai do schema. A segunda opcao e mais honesta ate
    que alguem precise do dado, porque `ApproximateReceiveCount` da fila ja conta entregas.
-3. **E20** -- carga com k6.
-4. **E21** -- documentacao final.
+3. **E22** -- documentacao final.
+
+**Sobre a numeracao.** O roteiro original tinha 22 fases, E0 a E21, e a E20 era a carga.
+Fechar o cenario 5 exigiu uma fase que nao estava no roteiro -- nao era um item do plano,
+era uma lacuna da auditoria, e ela virou **E20**, empurrando a carga para E21 e a
+documentacao final para E22. O total passa a 23. A renomeacao e do projeto inteiro, e nao
+so deste arquivo, para que "E20" nao signifique duas coisas em sessoes diferentes.
 
 **Ao rodar a integracao, pare o `wager-service` do Compose**: ele consome a mesma fila dos
 testes e faz `pendenciasteste` falhar com "pendencia nao retomada" e `deadlock`, que imita
