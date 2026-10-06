@@ -654,9 +654,11 @@ processo esta fora, a mensagem fica invisivel para os demais e volta depois.
 
 | Arquivo | Para que |
 |---|---|
-| `ARCHITECTURE.md` | decisoes com por que e custo |
-| `docs/carga.md` | relatorio de carga: ambiente, metodologia e resultado medido |
-| `docs/auditoria.md` | matriz de evidencia contra o enunciado, e as lacunas |
+| `COMO-EXECUTAR.md` | este arquivo: rodar a solucao do zero |
+| `docs/requisitos.md` | **cada requisito do enunciado e o teste que o executa** |
+| `docs/auditoria.md` | matriz por categoria, e os cinco defeitos que a auditoria achou |
+| `docs/carga.md` | relatorio de carga medido |
+| `ARCHITECTURE.md` | decisoes com por que e custo, e as limitacoes |
 | `docs/ambiente.md` | detalhe do ambiente, credenciais e diagnostico |
 | `docs/banco.md` | as oito migrations, uma a uma |
 | `docs/challenge.md` | copia do enunciado |
@@ -664,3 +666,17 @@ processo esta fora, a mensagem fica invisivel para os demais e volta depois.
 | `.env.example` | variaveis com valores locais de exemplo |
 | `deploy/keycloak/wager-realm.json` | realm, clientes e escopos |
 | `deploy/localstack/init/00-filas.sh` | filas FIFO e politica de redrive |
+
+## Onde comecar
+
+**Se voce quer conferir que o projeto funciona:** secao 2 (subir), secao 7 (uma carteira e
+uma aposta), secao 9 (testes).
+
+**Se voce quer entender as decisoes:** `ARCHITECTURE.md`. Cada secao tem o *por que* e o
+custo, e a secao "Limitacoes" diz o que nao foi feito e por que.
+
+**Se voce quer conferir a cobertura contra o enunciado:** `docs/requisitos.md`. Cada linha
+liga uma exigencia do `README.md` ao teste que a executa. `docs/auditoria.md` tem a visao
+por categoria, e `docs/carga.md` tem os numeros medidos.
+
+**Se voce encontrou um problema:** secao 10 tem a tabela de sintoma, causa e acao.
