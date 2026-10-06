@@ -1,5 +1,8 @@
 # Desafio Backend — Processamento Distribuído de Apostas em Go
 
+> **Solução:** [`COMO-EXECUTAR.md`](COMO-EXECUTAR.md) é o ponto de partida.
+> Cópia intacta deste enunciado: [`docs/challenge.md`](docs/challenge.md).
+
 Implemente um serviço em **Go**, com **Uber Fx**, para processar operações financeiras de provedores de jogos em um ambiente distribuído.
 
 ## 1. Objetivo
