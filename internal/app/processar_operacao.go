@@ -569,9 +569,31 @@ func resolver(
 		referenciante = referencia.referenciada
 	}
 
+	// O instante do lancamento e medido AQUI, depois do lock da carteira, e nao na
+	// entrada do caso de uso.
+	//
+	// A trigger `trg_ledger_coerente_na_carteira` e DEFERIDA e ordena a cadeia por
+	// `(created_at, id)`. Medir o instante antes de pegar o lock faz o carimbo refletir a
+	// ordem de CHEGADA, e nao a ordem de SERIALIZACAO: uma requisicao que entra depois e
+	// consegue o lock antes -- por estar esperando conexao do pool, digamos -- grava um
+	// `created_at` menor e a trigger passa a procurar o predecessor errado.
+	//
+	// O sintoma era `lancamento nao encadeia com o anterior: saldo anterior 87400,
+	// anterior 87000`, com a carteira em um valor e o ultimo lancamento em outro. Nao era
+	// dinheiro errado: era a transacao INTEIRA recusada pela constraint, e a operacao se
+	// perdia. Descoberto pela carga, a 661 requisicoes por segundo com pool pequeno de
+	// carteiras -- 2 ocorrencias em 25 mil iteracoes, e nenhuma sem contencao.
+	//
+	// Medir depois do lock resolve porque o lock da carteira e o que serializa: quem
+	// grava depois leu o saldo depois, entao o carimbo dele e posterior. A unica
+	// ressalva e o relogio andar para tras entre as duas medicoes -- ajuste de NTP --, e
+	// nesse caso a trigger recusa a transacao em vez de aceitar um lancamento fora de
+	// ordem. Falha barulhenta e o desfecho preferivel.
+	agoraDoLancamento := s.agora()
+
 	// O movimento. LOSS chega aqui sem efeito e devolve a carteira intacta, com
 	// lancamento invalido.
-	movida, lancamento, err := transacao.Aplicar(carteira, referenciante, agora)
+	movida, lancamento, err := transacao.Aplicar(carteira, referenciante, agoraDoLancamento)
 	if err != nil {
 		return recusaDe(err)
 	}
