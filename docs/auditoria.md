@@ -386,7 +386,7 @@ nao era classificado -- caia no 500 padrao.
 falha rapida e repetivel. Com 500, o provedor recebe o codigo que significa "o erro e
 meu" e tipicamente **nao repete** -- a transacao se perdia. Com 503 e um corpo que diz
 que repetir e seguro, a idempotencia faz o resto. O `lock_timeout` estava fazendo o
-trabalho dele e o resultado era desperdiçado: a contencao virava uma transacao
+trabalho dele e o resultado era desperdicado: a contencao virava uma transacao
 abandonada em vez de uma repeticao barata.
 
 **Por que a integracao nao pegou:** para esbarrar no `lock_timeout` de um segundo e
